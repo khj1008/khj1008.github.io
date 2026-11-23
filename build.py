@@ -134,6 +134,9 @@ def page(title, description, url, body, mermaid=False):
 <link rel="canonical" href="{esc(url)}">
 <link rel="stylesheet" href="{FONT_CSS}">
 <link rel="stylesheet" href="/assets/site.css">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
 {body}
@@ -272,6 +275,8 @@ def main():
     if (CONTENT / "img").exists():
         shutil.copytree(CONTENT / "img", OUT / "assets" / "img")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
+    for icon in (ROOT / "static" / "icons").glob("*"):
+        shutil.copy2(icon, OUT / icon.name)
 
     projects = sorted((read_project(p) for p in (CONTENT / "projects").glob("*.md")), key=lambda x: x[0]["order"])
     for meta, md in projects:
