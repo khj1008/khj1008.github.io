@@ -18,7 +18,7 @@
 <nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
 <article>
 <h1 class="post-title">Bitbucket Self-Hosted Runner로 멀티플랫폼 빌드부터 캐시까지 - DBC 제거</h1>
-<dl class="props"><dt>기술 스택</dt><dd><span class="tag">Bitbucket Pipelines</span><span class="tag">BuildKit</span><span class="tag">S3</span></dd><dt>분야</dt><dd><span class="tag">자동화</span></dd><dt>한 줄 요약</dt><dd>Self-hosted Runner에 멀티플랫폼 빌드와 BuildKit S3 캐시를 구성해 Docker Build Cloud 의존성을 제거하고, 재빌드 파이프라인을 약 1분 25초에서 1분으로 단축</dd><dt>핵심 역량</dt><dd><span class="tag">Kubernetes &amp; IaC</span></dd></dl>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">Bitbucket Pipelines</span><span class="tag">BuildKit</span><span class="tag">S3</span></dd><dt>분야</dt><dd><span class="tag">자동화</span></dd><dt>한 줄 요약</dt><dd>Self-hosted Runner에 멀티플랫폼 빌드와 BuildKit S3 캐시를 구성해 Docker Build Cloud 의존성을 제거하고, 재빌드 파이프라인을 약 1분 25초에서 1분으로 단축</dd><dt>핵심 역량</dt><dd><span class="tag">Kubernetes &amp; IaC</span></dd></dl><p class="original">MIDAS 기술 블로그(Medium)에 먼저 게시한 글입니다. <a href="https://medium.com/midastech/bitbucket-self-hosted-runner-%ED%95%98%EB%82%98%EB%A1%9C-%EB%A9%80%ED%8B%B0%ED%94%8C%EB%9E%AB%ED%8F%BC-%EB%B9%8C%EB%93%9C%EB%B6%80%ED%84%B0-%EC%BA%90%EC%8B%9C%EA%B9%8C%EC%A7%80-dbc-%EA%B1%B7%EC%96%B4%EB%82%B4%EA%B8%B0-034ca7a2ce77" target="_blank" rel="noopener">원문 보기</a></p>
 <div class="content">
 <p>Bitbucket Self-hosted Runner 환경에서 Docker Build Cloud 의존성을 제거하고, BuildKit S3 캐시와 Forge 앱 기반 Dynamic Pipeline으로 멀티 Workspace 빌드/배포 파이프라인을 구성한 경험을 공유합니다.</p>
 <h3 id="왜-이-작업이-필요했나">왜 이 작업이 필요했나?</h3>

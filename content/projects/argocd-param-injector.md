@@ -5,6 +5,7 @@ field: 자동화
 competency: k8s
 stack: Argo CD, Parameter Store, EKS
 order: 1
+original: https://medium.com/midastech/argocd-plugin-%EC%A0%81%EC%9A%A9-param-injector-58ced0c1e1c4
 ---
 ### 우리 팀이 GitOps에서 이미지 태그와 Secret을 관리하는 방법
 

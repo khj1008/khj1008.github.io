@@ -5,6 +5,7 @@ field: 인프라 설계
 competency: traffic
 stack: AWS Batch, EKS, NVIDIA GPU
 order: 2
+original: https://medium.com/midastech/ai-%EC%97%AD%EB%9F%89%EA%B2%80%EC%82%AC-%EC%98%81%EC%83%81-%EB%B6%84%EC%84%9D-%EC%84%9C%EB%B2%84-aws-batch-%EC%A0%84%ED%99%98%EA%B8%B0-4ba08c185fb4
 ---
 AI 역량검사 영상분석 서비스를 EC2 환경에서 AWS Batch on EKS로 전환하면서 분석 대기시간을 5.57배 단축한 경험을 공유합니다. EKS 클러스터에 Batch를 연동할 때 발생하는 노드 등록, GPU 플러그인, DaemonSet 스케줄링, 모니터링 에이전트 이슈까지 실전 트러블슈팅을 함께 다룹니다.
 

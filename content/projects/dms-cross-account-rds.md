@@ -5,6 +5,7 @@ field: 문제 해결
 competency: cloud
 stack: AWS DMS, RDS, MariaDB
 order: 7
+original: https://medium.com/midastech/dms%EB%A5%BC-%ED%99%9C%EC%9A%A9%ED%95%9C-aws-%EA%B3%84%EC%A0%95-%EA%B0%84-rds-%EB%A7%88%EC%9D%B4%EA%B7%B8%EB%A0%88%EC%9D%B4%EC%85%98-%EB%B0%8F-%EB%8F%99%EA%B8%B0%ED%99%94-b15200cc054d
 ---
 ## AWS DMS를 활용한 계정 간 RDS 마이그레이션 실전 가이드
 

@@ -18,7 +18,7 @@
 <nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
 <article>
 <h1 class="post-title">GitOps인데 Git에 아무것도 없다?</h1>
-<dl class="props"><dt>기술 스택</dt><dd><span class="tag">Argo CD</span><span class="tag">Parameter Store</span><span class="tag">EKS</span></dd><dt>분야</dt><dd><span class="tag">자동화</span></dd><dt>한 줄 요약</dt><dd>Argo CD Config Management Plugin을 직접 개발해 Secret과 이미지 태그를 Parameter Store에서 렌더링 시점에 주입, GitOps 저장소에 민감 정보와 태그 커밋을 남기지 않도록 전환</dd><dt>핵심 역량</dt><dd><span class="tag">Kubernetes &amp; IaC</span></dd></dl>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">Argo CD</span><span class="tag">Parameter Store</span><span class="tag">EKS</span></dd><dt>분야</dt><dd><span class="tag">자동화</span></dd><dt>한 줄 요약</dt><dd>Argo CD Config Management Plugin을 직접 개발해 Secret과 이미지 태그를 Parameter Store에서 렌더링 시점에 주입, GitOps 저장소에 민감 정보와 태그 커밋을 남기지 않도록 전환</dd><dt>핵심 역량</dt><dd><span class="tag">Kubernetes &amp; IaC</span></dd></dl><p class="original">MIDAS 기술 블로그(Medium)에 먼저 게시한 글입니다. <a href="https://medium.com/midastech/argocd-plugin-%EC%A0%81%EC%9A%A9-param-injector-58ced0c1e1c4" target="_blank" rel="noopener">원문 보기</a></p>
 <div class="content">
 <h3 id="우리-팀이-gitops에서-이미지-태그와-secret을-관리하는-방법">우리 팀이 GitOps에서 이미지 태그와 Secret을 관리하는 방법</h3>
 <p>쿠버네티스에서는 민감한 정보를 secret이라는 리소스에 저장한다. 하지만 GitOps를 운영하다 보면 Repository에 secret 리소스가 정의되고 base64로 인코딩한다고 해도 <b>암호화(encryption)가 아니라 인코딩</b>이므로 위험할 수 있다.</p>

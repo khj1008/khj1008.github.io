@@ -5,6 +5,7 @@ field: 자동화
 competency: k8s
 stack: Bitbucket Pipelines, BuildKit, S3
 order: 3
+original: https://medium.com/midastech/bitbucket-self-hosted-runner-%ED%95%98%EB%82%98%EB%A1%9C-%EB%A9%80%ED%8B%B0%ED%94%8C%EB%9E%AB%ED%8F%BC-%EB%B9%8C%EB%93%9C%EB%B6%80%ED%84%B0-%EC%BA%90%EC%8B%9C%EA%B9%8C%EC%A7%80-dbc-%EA%B1%B7%EC%96%B4%EB%82%B4%EA%B8%B0-034ca7a2ce77
 ---
 Bitbucket Self-hosted Runner 환경에서 Docker Build Cloud 의존성을 제거하고, BuildKit S3 캐시와 Forge 앱 기반 Dynamic Pipeline으로 멀티 Workspace 빌드/배포 파이프라인을 구성한 경험을 공유합니다.
 

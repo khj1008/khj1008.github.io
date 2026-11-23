@@ -98,6 +98,7 @@ table.stack th { background: var(--soft); font-weight: 600; white-space: nowrap;
 .props { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; font-size: 14px; padding-bottom: 20px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
 .props dt { color: var(--muted); padding-top: 1px; }
 .props dd { margin: 0; }
+.original { font-size: 14px; color: var(--muted); background: var(--callout); border-radius: 6px; padding: 10px 14px; margin: -12px 0 28px; }
 
 .content > :first-child { margin-top: 0; }
 .content p { margin: 0 0 14px; }

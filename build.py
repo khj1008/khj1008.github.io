@@ -16,6 +16,7 @@ content/ 의 원고를 읽어 docs/ 에 HTML 을 만든다. GitHub Pages 는 doc
     competency: cloud | k8s | traffic | security | monitoring | engineering
     stack: 기술1, 기술2, 기술3
     order: 메인 카드 순서(작을수록 앞)
+    original: (선택) 다른 곳에 먼저 게시한 글이면 원문 주소
     ---
 """
 import hashlib
@@ -230,6 +231,9 @@ def build_project(meta, md):
         f'<dt>핵심 역량</dt><dd>{tags([comp["label"]])}</dd>'
         "</dl>"
     )
+    if meta.get("original"):
+        props += (f'<p class="original">MIDAS 기술 블로그(Medium)에 먼저 게시한 글입니다. '
+                  f'<a href="{esc(meta["original"])}" target="_blank" rel="noopener">원문 보기</a></p>')
     body = f"""<main class="page narrow">
 <nav class="crumb"><a href="/">← {esc(site["title"])}</a></nav>
 <article>

@@ -18,7 +18,7 @@
 <nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
 <article>
 <h1 class="post-title">AI 역량검사 영상 분석 서버 AWS Batch 전환기</h1>
-<dl class="props"><dt>기술 스택</dt><dd><span class="tag">AWS Batch</span><span class="tag">EKS</span><span class="tag">NVIDIA GPU</span></dd><dt>분야</dt><dd><span class="tag">인프라 설계</span></dd><dt>한 줄 요약</dt><dd>GPU 영상 분석 서버를 EC2 직접 운영에서 AWS Batch on EKS로 전환해 분석 대기시간을 평균 227분에서 41분으로 단축</dd><dt>핵심 역량</dt><dd><span class="tag">트래픽 대응</span></dd></dl>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">AWS Batch</span><span class="tag">EKS</span><span class="tag">NVIDIA GPU</span></dd><dt>분야</dt><dd><span class="tag">인프라 설계</span></dd><dt>한 줄 요약</dt><dd>GPU 영상 분석 서버를 EC2 직접 운영에서 AWS Batch on EKS로 전환해 분석 대기시간을 평균 227분에서 41분으로 단축</dd><dt>핵심 역량</dt><dd><span class="tag">트래픽 대응</span></dd></dl><p class="original">MIDAS 기술 블로그(Medium)에 먼저 게시한 글입니다. <a href="https://medium.com/midastech/ai-%EC%97%AD%EB%9F%89%EA%B2%80%EC%82%AC-%EC%98%81%EC%83%81-%EB%B6%84%EC%84%9D-%EC%84%9C%EB%B2%84-aws-batch-%EC%A0%84%ED%99%98%EA%B8%B0-4ba08c185fb4" target="_blank" rel="noopener">원문 보기</a></p>
 <div class="content">
 <p>AI 역량검사 영상분석 서비스를 EC2 환경에서 AWS Batch on EKS로 전환하면서 분석 대기시간을 5.57배 단축한 경험을 공유합니다. EKS 클러스터에 Batch를 연동할 때 발생하는 노드 등록, GPU 플러그인, DaemonSet 스케줄링, 모니터링 에이전트 이슈까지 실전 트러블슈팅을 함께 다룹니다.</p>
 <figure><img src="https://cdn-images-1.medium.com/max/1024/1*THGjj6RhCXhT9pXyLcJEIA.png" alt="" loading="lazy"></figure>
