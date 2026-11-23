@@ -43,6 +43,8 @@ a:hover { text-decoration-color: var(--text); }
 .callout p { margin: 0; }
 .callout .headline { font-weight: 600; margin-bottom: 8px; }
 .callout .contact { margin-top: 8px; }
+.callout .note { color: var(--muted); font-size: 14px; margin-top: 2px; }
+.section-note { color: var(--muted); font-size: 14px; margin: 0 0 4px; }
 
 h2.section { font-size: 24px; font-weight: 700; margin: 48px 0 8px; line-height: 1.3; }
 

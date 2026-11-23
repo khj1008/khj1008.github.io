@@ -158,6 +158,7 @@ def build_home(projects):
         '<div class="callout"><div class="icon" aria-hidden="true">📇</div><div>'
         f'<p class="headline">{esc(p["headline"])}</p>'
         f'<p>{"<br>".join(esc(l) for l in p["lines"])}</p>'
+        + (f'<p class="note">{esc(p["note"])}</p>' if p.get("note") else "") +
         f'<p class="contact">📮 <a href="mailto:{esc(p["email"])}">{esc(p["email"])}</a></p>'
         "</div></div>"
     )
@@ -181,6 +182,7 @@ def build_home(projects):
             '<p class="label">맡은 일</p><ul>' + "".join(f"<li>{esc(x)}</li>" for x in c["duties"]) + "</ul>"
             '<p class="label">주요 성과</p><ul>' + "".join(f"<li>{esc(x)}</li>" for x in c["achievements"]) + "</ul>"
         )
+    career_note = f'<p class="section-note">{esc(site["career_note"])}</p>' if site.get("career_note") else ""
     stack_rows = "".join(f"<tr><th>{esc(k)}</th><td>{esc(v)}</td></tr>" for k, v in site["stack"])
     script = """<script>
 (() => {
@@ -206,7 +208,7 @@ def build_home(projects):
 <div class="tabs" role="tablist">{"".join(tab_buttons)}</div>
 <div class="cards">{"".join(cards)}</div>
 <h2 class="section">🏢 경력</h2>
-<div class="career">{"".join(career)}</div>
+{career_note}<div class="career">{"".join(career)}</div>
 <h2 class="section">🛠 기술 스택</h2>
 <table class="stack">{stack_rows}</table>
 {footer()}

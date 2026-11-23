@@ -12,15 +12,40 @@
       "마이다스인 DevOps 2021.07 – 현재",
       "마이다스아이티 CAE 개발 2020.01 – 2021.06"
     ],
-    "email": "kimhyju703@naver.com"
+    "email": "kimhyju703@naver.com",
+    "note": "두 회사 모두 마이다스그룹 계열사"
   },
   "competencies": [
-    {"key": "cloud", "label": "클라우드 인프라", "tab": "클라우드"},
-    {"key": "k8s", "label": "Kubernetes & IaC", "tab": "K8s & IaC"},
-    {"key": "traffic", "label": "트래픽 대응", "tab": "트래픽"},
-    {"key": "security", "label": "보안", "tab": "보안"},
-    {"key": "monitoring", "label": "모니터링", "tab": "모니터링"},
-    {"key": "engineering", "label": "엔지니어링 솔루션", "tab": "엔지니어링"}
+    {
+      "key": "cloud",
+      "label": "클라우드 인프라",
+      "tab": "클라우드"
+    },
+    {
+      "key": "k8s",
+      "label": "Kubernetes & IaC",
+      "tab": "K8s & IaC"
+    },
+    {
+      "key": "traffic",
+      "label": "트래픽 대응",
+      "tab": "트래픽"
+    },
+    {
+      "key": "security",
+      "label": "보안",
+      "tab": "보안"
+    },
+    {
+      "key": "monitoring",
+      "label": "모니터링",
+      "tab": "모니터링"
+    },
+    {
+      "key": "engineering",
+      "label": "엔지니어링 솔루션",
+      "tab": "엔지니어링"
+    }
   ],
   "career": [
     {
@@ -60,12 +85,34 @@
     }
   ],
   "stack": [
-    ["클라우드", "AWS, GCP, NCP"],
-    ["IaC", "Terraform, Terragrunt"],
-    ["컨테이너", "Kubernetes(EKS), Docker, Helm, Kustomize"],
-    ["CI/CD", "Argo CD, Bitbucket Pipelines, Jenkins"],
-    ["모니터링 및 로깅", "Datadog, CloudWatch, Fluent Bit, ELK, Zabbix"],
-    ["데이터베이스", "RDS(MySQL, MariaDB), Aurora, DynamoDB"],
-    ["언어", "Python, Java, Bash, C++"]
-  ]
+    [
+      "클라우드",
+      "AWS, GCP, NCP"
+    ],
+    [
+      "IaC",
+      "Terraform, Terragrunt"
+    ],
+    [
+      "컨테이너",
+      "Kubernetes(EKS), Docker, Helm, Kustomize"
+    ],
+    [
+      "CI/CD",
+      "Argo CD, Bitbucket Pipelines, Jenkins"
+    ],
+    [
+      "모니터링 및 로깅",
+      "Datadog, CloudWatch, Fluent Bit, ELK, Zabbix"
+    ],
+    [
+      "데이터베이스",
+      "RDS(MySQL, MariaDB), Aurora, DynamoDB"
+    ],
+    [
+      "언어",
+      "Python, Java, Bash, C++"
+    ]
+  ],
+  "career_note": "마이다스인과 마이다스아이티는 모두 마이다스그룹 계열사입니다."
 }
