@@ -1,0 +1,102 @@
+---
+title: Teleport로 테스트 환경 DB 접근제어 구축
+summary: Teleport와 RDS IAM 인증으로 테스트 환경 DB 접속을 비밀번호 없는 하나의 경로로 통합한 작업
+field: 인프라 설계
+competency: security
+stack: Teleport, IAM, RDS
+order: 10
+---
+테스트 환경 RDS의 접근제어와 감사 체계를 상용 솔루션 대신 오픈소스 Teleport Community Edition으로 구성한 경험을 정리합니다. RDS IAM 인증과 교차 계정 AssumeRole을 조합해서, 개발자에게 DB 비밀번호를 배포하지 않고도 기존에 사용하던 IDE 그대로 접속할 수 있도록 구성했습니다.
+
+## 왜 이 작업이 필요했나?
+
+사내 테스트 환경은 개발, 테스트, QA 세 단계로 구분돼 있고, 개발자가 직접 접속하는 RDS(MySQL/MariaDB)가 여러 개 있습니다. 그동안은 환경마다 DB 접근 계정을 개별적으로 관리하고 있었고 RDS IAM 인증도 비활성화돼 있어서, IAM이나 Role 기준으로 접근을 통제할 방법이 없었습니다. 누가 언제 어떤 DB에 접속했는지도 확인할 수 없었습니다. 접근 통제와 감사(Audit)가 필요했지만 운영 환경도 아닌 테스트 환경에 상용 접근제어 솔루션 비용을 지출하기는 부담스러워서, 오픈소스로 직접 구성하기로 했습니다.
+
+해결해야 할 제약도 몇 가지 있었습니다. DB는 접근제어 서버를 배치할 AWS 계정과 다른 계정에 위치해 있어서 계정 경계를 넘어 인증해야 했습니다. 또 개발자들은 mysql CLI보다 IntelliJ나 DBeaver 같은 IDE로 DB 작업을 하기 때문에, 접속 경로가 변경돼도 기존 도구를 그대로 사용할 수 있어야 했습니다. 배포본을 확보하는 것도 과제였는데, Teleport 공식 사이트가 Enterprise Edition 위주로 안내하고 있어서 Community Edition의 공개 컨테이너 이미지와 설치 스크립트를 찾는 것부터 시작해야 했습니다.
+
+저는 DevOps 엔지니어로 사내 웹서비스 DB 관리를 주로 담당하고 있었고, 이 프로젝트에서는 Teleport 검증과 구축, RDS IAM 인증과 교차 계정 권한 설계, 개발자용 접속 가이드 작성까지 직접 수행했습니다.
+
+## 어떻게 해결했나
+
+### 왜 Community Edition인가
+
+선택지는 상용 접근제어 솔루션, Teleport Enterprise, Teleport Community였습니다. 상용 솔루션은 완성된 제품이지만 테스트 환경 용도로는 비용 부담이 컸고, Enterprise도 유료 라이선스여서 비용 문제가 해소되지 않았습니다. Community Edition은 라이선스 비용 없이 DB 접근 프록시와 역할 기반 권한, 감사 로그를 한 도구에서 제공합니다. 인증이 로컬 계정 기반이고 배포본과 문서를 직접 찾아 구성해야 한다는 불편은 있었지만, 테스트 환경에 필요한 기능은 이것으로 충족할 수 있다고 판단했습니다.
+
+### 컨테이너로 먼저 검증하고 서버로
+
+처음부터 서버에 설치하지 않고, 공개 이미지로 컨테이너를 실행해 기본 설정 파일의 구조와 포트, 헬스체크 동작부터 확인했습니다. 구조를 파악한 뒤에 EC2에 설치 스크립트로 Auth/Proxy 서버를 설치하고 systemd 서비스로 등록했습니다. Teleport에서 실제 DB 연결은 Database Service라는 별도 역할이 담당하는데, 메인 서버는 인증과 프록시만 담당하게 두고 Database Service는 별도 인스턴스로 실행해 메인 서버가 발급한 조인 토큰으로 클러스터에 연결했습니다. 이후 Database Service는 Helm 차트로 Kubernetes에 배포했고, 덕분에 DB를 추가할 때는 values 파일을 수정하고 <code>helm upgrade</code>만 실행하면 됐습니다.
+
+![Database Service로 등록한 DB가 표시된 Teleport 웹 UI (DB 이름은 가림)](/assets/img/teleport/01.png)
+
+중간에 Teleport의 AWS OIDC Integration으로 웹 UI에서 RDS 목록을 자동으로 조회하는 방식도 시도했습니다. 목록은 정상적으로 조회됐지만 실제 접속에는 결국 Database Service가 필요해서, 연결 경로는 Database Service 중심으로 구성했습니다.
+
+### 비밀번호 대신 RDS IAM 인증
+
+RDS에 IAM 인증을 활성화하고 DB 계정을 <code>AWSAuthenticationPlugin</code> 방식으로 생성했습니다. Database Service가 DB 측 계정의 IAM Role을 AssumeRole해서 IAM 인증으로 접속하기 때문에 개발자는 DB 비밀번호를 전달받을 필요가 없고, IDE에서도 비밀번호를 입력하지 않은 채 접속합니다. 비밀번호를 배포하고 회수하는 절차 자체가 불필요해진 셈입니다.
+
+![RDS 인증 옵션에서 IAM 데이터베이스 인증 활성화](/assets/img/teleport/02.png)
+
+DB 계정을 개발자마다 개별 생성할지, 역할 단위로 통합할지도 검토했습니다. 최종적으로 관리자용과 개발자용 두 개의 역할 계정으로 결정했는데, 관리자용은 계정과 복제 관리까지 포함한 운영 권한을 보유하고 개발자용은 DML과 일부 DDL 권한만 보유합니다. 인원이 증가해도 DB 계정 수가 증가하지 않아 관리가 단순하다는 것이 장점이었습니다. 대신 DB 자체 로그만으로는 개인을 구분할 수 없어서, 개인 식별은 Teleport 로그인 사용자 기준으로 기록되는 감사 로그가 담당하는 구조가 됩니다.
+
+### 프로젝트 단위로 권한 축소하기
+
+Teleport 16.1부터는 Role에 접근 가능한 <code>db_users</code>가 명시돼 있어야 하고, 접속할 때도 DB 사용자를 지정해야 합니다. 처음에는 와일드카드로 허용해 연결 자체가 가능한지부터 확인했고, 이후 프로젝트 단위 Role로 분리해 범위를 축소했습니다. Role마다 접근할 수 있는 DB는 라벨로, 스키마와 DB 계정은 이름 목록으로 제한했습니다. 다른 프로젝트 DB가 반드시 필요한 경우에는 해당 DB만 허용하는 보조 Role을 별도로 부여했습니다.
+
+```mermaid
+flowchart LR
+  subgraph DEV["개발자 PC"]
+    IDE["IDE / DB 클라이언트"] --> TSH["tsh 로컬 터널"]
+  end
+  subgraph OPS["접근제어 운영 계정"]
+    AUTH["Teleport Auth/Proxy<br>로그인, RBAC, 감사 로그"]
+    DBS["Teleport Database Service<br>Helm 에이전트"]
+  end
+  subgraph DBACC["DB가 있는 계정"]
+    ROLE["교차 계정 IAM Role"]
+    RDS[("RDS MySQL/MariaDB<br>IAM 인증")]
+  end
+  TSH --> AUTH
+  DBS -- "조인 토큰으로 참여" --> AUTH
+  DBS -- "AssumeRole + External ID" --> ROLE
+  DBS -- "IAM 인증으로 접속" --> RDS
+```
+
+## 까다로웠던 부분
+
+### 계정 경계를 넘는 IAM 인증
+
+교차 계정 IAM 인증은 세 곳의 권한이 모두 맞물려야 동작합니다. DB가 있는 계정에는 RDS IAM 접속 권한을 보유한 Role과 Teleport 운영 계정을 신뢰하는 trust policy가 필요하고, 운영 계정 측에서는 Database Service가 사용하는 Role에 해당 Role로 AssumeRole할 수 있는 권한을 부여해야 합니다. 그리고 Database Service 설정에서 DB마다 AssumeRole할 Role과 External ID를 지정합니다.
+
+신뢰 정책은 초기에 특정 EC2 인스턴스 세션을 Principal로 지정했습니다. 최종 구성에서는 Teleport 운영 계정 단위로 신뢰하고, 실제로 AssumeRole할 수 있는 주체는 운영 계정 측 Role의 IAM 정책으로 제한하는 방식으로 변경했습니다. 이렇게 하면 인스턴스가 변경돼도 DB 계정 측 신뢰 정책을 수정할 필요가 없습니다. 대신 운영 계정 측 IAM 정책이 실질적인 통제 지점이 되기 때문에 해당 권한은 최소 범위로 관리해야 했습니다. DB 측 사용자는 IAM 인증 플러그인으로 생성하고, 허용 호스트도 내부 대역으로 한정했습니다.
+
+### IDE를 그대로 사용하는 접속 경로
+
+<code>tsh db connect</code>는 개발자 PC에 mysql 클라이언트가 설치돼 있어야 동작합니다. 개발자는 주로 IDE로 DB 작업을 하기 때문에 이 방식만으로는 부족했고, 따라서 tsh로 로컬 포트에 터널을 열고 IDE는 해당 포트에 접속하는 방식을 표준으로 채택했습니다.
+
+```bash
+tsh login --proxy=<teleport-주소> --user=<사용자>
+tsh db ls
+tsh proxy db --tunnel <db-name> --db-user=<역할-계정> --port=<로컬-포트>
+```
+
+IDE 접속 정보에는 호스트로 로컬 주소, 포트로 터널 포트, 사용자 이름으로 <code>--db-user</code>에 지정한 계정을 입력합니다. 인증은 터널이 처리하므로 IntelliJ에서는 비밀번호를 공란으로 두고, DBeaver에서는 드라이버 설정에서 No Authentication을 선택하면 됩니다. 포트를 지정하지 않으면 매번 무작위 포트가 할당되므로, 포트를 고정하는 방법도 가이드에 포함했습니다. Teleport 웹 UI는 접근 가능한 리소스 목록은 표시하지만 DB 접속 기능은 지원하지 않아서, 접속은 CLI로 통일하고 Mac과 Windows용 tsh 설치 방법을 가이드로 정리했습니다.
+
+![IntelliJ에서는 호스트를 로컬 주소로 지정하고 비밀번호를 공백으로 설정 (계정과 포트는 가림)](/assets/img/teleport/03.png)
+
+![DBeaver에서는 드라이버 설정에서 No authentication 선택 (포트는 가림)](/assets/img/teleport/04.png)
+
+### 버전별로 변경되는 설정
+
+Teleport는 버전마다 설정 요구사항이 상이해서, 검증 과정에서 14.x 이미지, 15.x 설치본, 16.1.x 클라이언트와 차트를 순차적으로 사용했습니다. 앞서 언급한 16.1의 DB 사용자 요구사항은 Role에 DB 사용자를 명시하고 접속 명령에 DB 사용자 옵션을 추가하는 방식으로 대응했습니다. Helm 에이전트 설정에서는 DB 주소에 RDS 기본 엔드포인트가 아닌 주소를 사용하면 인증서 오류가 발생해 기본 엔드포인트로 통일했습니다. 헬스체크 경로는 설정 파일에 진단 주소(<code>diag_addr</code>)를 명시해야 응답한다는 것도 이 과정에서 확인했습니다. OIDC Integration으로 RDS 목록을 조회할 때는 추가 IAM 권한이 필요했는데, Teleport가 생성하는 권한 설정 명령을 실행할 때 AWS 프로필을 대상 계정으로 지정해야 했습니다.
+
+## 결과
+
+이제 개발자는 Teleport 계정 하나로 로그인하고, 자신의 Role에 허용된 DB만 목록에서 확인하고 접속합니다. RDS IAM 인증을 활성화하면서 개발자에게 DB 비밀번호를 배포하지 않게 됐고, 권한은 프로젝트 단위 Role로 DB와 스키마, DB 계정 범위까지 제한했습니다. 계정이 다른 AWS 환경에 있는 RDS도 동일한 인증 방식으로 통합했고, 접속이 모두 Teleport를 경유하기 때문에 개인 식별은 Teleport 감사 로그가 담당하게 됐습니다.
+
+개발자 입장에서는 tsh로 터널을 연 뒤 기존에 사용하던 IDE에서 로컬 포트로 접속하면 되므로, 접근 통제가 추가됐는데도 작업 도구는 변경하지 않아도 됩니다. 오픈소스로 구성해 라이선스 비용도 발생하지 않았습니다.
+
+## 돌아보며
+
+16.1의 <code>db_users</code> 요구사항처럼 Teleport는 버전 업그레이드가 곧 권한 모델 변경일 수 있다는 점을 직접 확인했습니다. 역할별 공용 DB 계정은 관리 부담을 낮추지만, DB 레벨에서는 개인을 구분할 수 없어서 감사를 Teleport 로그에 의존하게 되는 트레이드오프가 있습니다. 검증을 신속하게 진행하기 위해 초기에는 권한을 넓게 허용하고 일부 설정은 TLS 검증을 비활성화한 채로 시작했는데, 이 과정에서 RDS 기본 엔드포인트를 사용하면 인증서 검증이 정상적으로 통과한다는 것도 확인했습니다.
+
+<b>기술 스택</b>: Teleport, AWS IAM, Amazon RDS

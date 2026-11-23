@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EKS Terraform 모듈 설계 | 김형준</title>
+<meta name="description" content="state를 셋으로 분리해 클러스터를 변경하지 않고 IAM Role과 SG를 추가할 수 있도록 설계한 EKS 모듈">
+<meta property="og:type" content="website">
+<meta property="og:title" content="EKS Terraform 모듈 설계 | 김형준">
+<meta property="og:description" content="state를 셋으로 분리해 클러스터를 변경하지 않고 IAM Role과 SG를 추가할 수 있도록 설계한 EKS 모듈">
+<meta property="og:url" content="https://khj1008.github.io/projects/eks-terraform-module/">
+<link rel="canonical" href="https://khj1008.github.io/projects/eks-terraform-module/">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<main class="page narrow">
+<nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
+<article>
+<h1 class="post-title">EKS Terraform 모듈 설계</h1>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">Terraform</span><span class="tag">EKS</span><span class="tag">IAM</span></dd><dt>분야</dt><dd><span class="tag">인프라 설계</span></dd><dt>한 줄 요약</dt><dd>state를 셋으로 분리해 클러스터를 변경하지 않고 IAM Role과 SG를 추가할 수 있도록 설계한 EKS 모듈</dd><dt>핵심 역량</dt><dd><span class="tag">Kubernetes &amp; IaC</span></dd></dl>
+<div class="content">
+<p>서비스 인프라를 ECS에서 EKS로 이전하면서 클러스터를 구축할 Terraform 코드를 새로 설계했습니다. 공개 EKS 모듈은 그대로 유지한 채 래핑만 했고, IAM Role과 Security Group, 클러스터를 서로 다른 state로 분리해 클러스터를 변경하지 않고도 권한과 네트워크 규칙을 추가할 수 있도록 구성한 과정을 정리합니다.</p>
+<h2 id="왜-이-작업이-필요했나">왜 이 작업이 필요했나?</h2>
+<p>ECS에서 EKS로 마이그레이션하게 되면서 클러스터를 구축할 Terraform 코드가 필요했습니다. 기존 Terraform 구조는 ECS와 EC2 중심이었는데, EKS는 리소스 종류도 다르고 리소스 간 연결 방식도 상이해서 기존 코드를 이관하는 것만으로는 부족했습니다. 장기간 운영하면서 누적된 문제도 있었습니다. Security Group과 IAM Role은 콘솔에서 직접 수정하는 일이 빈번했고, 그때마다 코드와 실제 리소스가 불일치했습니다.</p>
+<p>기존 모듈이 사용하기 불편하다는 점도 컸습니다. Security Group 모듈은 규칙 대상이 CIDR인지, 다른 SG인지, prefix list인지에 따라 서로 다른 배열에 분리해 입력해야 해서 가독성이 떨어졌습니다. IAM Role 모듈은 role, policy, statement를 각각 별도로 선언해야 해서 Role 하나를 이해하려면 여러 블록을 함께 확인해야 했습니다. 팀원들이 콘솔 대신 코드로 SG와 Role을 정의하게 하려면 입력 방식부터 단순해야 했습니다.</p>
+<p>운영 방식에 따른 제약도 있었습니다. 팀 규모를 고려하면 모든 변경을 GitOps 파이프라인으로 강제하는 것이 오히려 업무 속도를 늦출 수 있어서, 수동으로 apply하는 방식에서도 안전한 구조가 필요했습니다. 또한 EKS를 업데이트할 때 주변 리소스는 유지한 채 클러스터만 교체하는 블루그린 방식을 적용할 수 있어야 했습니다.</p>
+<p>저는 모듈 구조 설계부터 구현, 완성한 모듈로 실제 클러스터를 구축하는 것까지 담당했습니다. 이 모듈로 SG와 Role을 정의해 사용하는 사람은 팀원들이기 때문에, 내부 구현이 다소 복잡해지더라도 사용하는 측의 입력이 단순해지는 방향을 우선시했습니다.</p>
+<h2 id="어떻게-해결했나">어떻게 해결했나</h2>
+<h3 id="공개-모듈은-수정하지-않기">공개 모듈은 수정하지 않기</h3>
+<p>modules 계층에는 공개 모듈인 terraform-aws-eks 코드를 그대로 가져와 포함했습니다. 불필요한 파일만 삭제하고 코드는 수정하지 않았고, 팀에 맞춘 변경은 모두 infrastructure 계층에서 이 모듈을 래핑하는 방식으로 적용했습니다. 이렇게 경계를 분리해 두면 어디까지가 공개 모듈의 동작이고 어디부터가 저희 설정인지 명확히 구분됩니다.</p>
+<figure><img src="/assets/img/eks/01.png" alt="공개 EKS 모듈은 수정 없이 유지한 modules 계층" loading="lazy"><figcaption>공개 EKS 모듈은 수정 없이 유지한 modules 계층</figcaption></figure>
+<h3 id="state를-어떻게-분리할-것인가">state를 어떻게 분리할 것인가</h3>
+<p>처음에는 클러스터 생성에 필요한 IAM Role과 Security Group을 한 depth에 모아 한 번에 생성하는 방식을 검토했습니다. 그러나 클러스터를 생성한 뒤에도 서비스나 노드가 사용할 Role과 SG는 지속적으로 추가됩니다. 모두 한 state에 포함하면 최초 구축 시 apply 한 번으로 완료되는 대신, Role이나 SG 하나를 추가할 때마다 클러스터와 같은 state를 변경하게 됩니다. 서비스와 노드용 리소스를 Helm이나 controller로 생성하는 방법도 고려했지만, 검토 결과 불편한 점이 많았고 관리 지점이 Terraform 외부로 분산된다는 문제도 있었습니다.</p>
+<p>따라서 IAM Role, Security Group, 클러스터를 각각 독립된 state로 분리했습니다. 처음 클러스터를 생성할 때 apply를 세 번 실행해야 하는 불편이 발생하지만, 이는 최초 구축 시 한 번만 감수하는 비용이고 이후 Role이나 SG를 추가할 때는 클러스터 의존 없이 더 안전하게 apply할 수 있습니다. 자주 변경되는 리소스가 바로 SG와 IAM Role이었기 때문에 이 방식이 적합하다고 판단했습니다. 서비스와 노드용 리소스까지 Terraform으로 생성하기로 한 것도 같은 이유였는데, 콘솔 수정으로 발생하는 state 불일치를 최소화하려면 관리 지점이 한 곳이어야 했습니다.</p>
+<figure><img src="/assets/img/eks/02.png" alt="IAM Role, Security Group, 클러스터를 별도로 분리한 구조" loading="lazy"><figcaption>IAM Role, Security Group, 클러스터를 별도로 분리한 구조</figcaption></figure>
+<h3 id="클러스터는-주변-리소스를-주입받아-사용하기">클러스터는 주변 리소스를 주입받아 사용하기</h3>
+<p>클러스터 스택에서는 공개 EKS 모듈이 기본으로 생성하는 주변 리소스를 비활성화하고 외부에서 주입받도록 했습니다. 클러스터 Security Group과 클러스터 IAM Role, Fargate profile용 IAM Role은 모듈의 생성 옵션을 false로 설정하고 앞 단계에서 생성한 값을 변수로 전달받습니다. 노드 Security Group도 기본으로 생성하지 않도록 비활성화했고, KMS 키 역시 새로 생성하지 않고 기존 키를 전달받아 Kubernetes secrets 암호화에 사용했습니다.</p>
+<p>이렇게 하면 클러스터 state에는 클러스터 자체만 남습니다. 클러스터를 새로 생성해 교체하더라도 Role, SG, KMS 키는 그대로 재사용할 수 있으므로, 블루그린 업데이트에 필요한 "클러스터만 교체할 수 있는 구조"가 여기서 확보됩니다. 반대 방향의 의존성도 하나 있는데, IRSA trust relationship에 필요한 OIDC Provider ARN은 클러스터가 생성돼야 확인할 수 있어서 클러스터를 생성한 뒤에 IAM Role 측에서 연동하도록 했습니다. 각 스택은 생성한 리소스의 이름과 ID, ARN을 output으로 출력하고 JSON 파일로도 저장해, 다음 단계에 전달할 값을 한곳에서 확인할 수 있게 했습니다.</p>
+<pre class="mermaid">flowchart LR
+  IAM[&quot;IAM Role 스택&quot;] -- &quot;클러스터 및 Fargate Role ARN&quot; --&gt; CL[&quot;클러스터 스택&quot;]
+  SG[&quot;Security Group 스택&quot;] -- &quot;클러스터 SG ID&quot; --&gt; CL
+  MOD[&quot;공개 EKS 모듈 (수정 없음)&quot;] --&gt; CL
+  KMS[&quot;기존 KMS 키&quot;] -. &quot;secrets 암호화&quot; .-&gt; CL
+  CL -. &quot;OIDC Provider ARN (클러스터 생성 후)&quot; .-&gt; IAM</pre>
+<h2 id="까다로웠던-부분">까다로웠던 부분</h2>
+<h3 id="security-group은-address-하나로">Security Group은 address 하나로</h3>
+<p>앞서 언급한 것처럼 기존 SG 모듈은 규칙 대상 유형마다 입력해야 하는 배열이 달랐고, ingress와 egress를 합치면 배열이 여섯 개였습니다. 사용자가 이 구분을 의식하지 않도록, 규칙마다 <code>address</code> 하나만 입력하면 값의 형식에 따라 적절한 배열로 분류하도록 구현했습니다. 값이 CIDR 형식인지, 아니면 sg-나 pl-로 시작하는지를 정규식으로 판별해 locals에서 배열을 분리해 생성하는 방식입니다.</p>
+<div class="highlight highlight-source-hcl"><pre><span class="pl-v"><span class="pl-smi">security_groups</span> <span class="pl-k">=</span> </span>{
+  app <span class="pl-k">=</span> {
+    ingress <span class="pl-k">=</span> [
+      { port_protocol <span class="pl-k">=</span> [<span class="pl-c1">443</span>, <span class="pl-c1">443</span>, <span class="pl-s"><span class="pl-pds">"</span>tcp<span class="pl-pds">"</span></span>],   address <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>&lt;CIDR&gt;<span class="pl-pds">"</span></span>,      description <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>CIDR 대상<span class="pl-pds">"</span></span> },
+      { port_protocol <span class="pl-k">=</span> [<span class="pl-c1">8080</span>, <span class="pl-c1">8080</span>, <span class="pl-s"><span class="pl-pds">"</span>tcp<span class="pl-pds">"</span></span>], address <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>sg-xxxxxxxx<span class="pl-pds">"</span></span>, description <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>다른 SG 대상<span class="pl-pds">"</span></span> },
+    ]
+    egress <span class="pl-k">=</span> [{ port_protocol <span class="pl-k">=</span> [<span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-s"><span class="pl-pds">"</span>-1<span class="pl-pds">"</span></span>], address <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>pl-xxxxxxxx<span class="pl-pds">"</span></span>, description <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>prefix list 대상<span class="pl-pds">"</span></span> }]
+  }
+}</pre></div>
+<p>이렇게 정리한 map을 <code>for_each</code>로 순회하며 SG 모듈을 반복 호출하고, 결과는 SG 이름과 ID의 map으로 출력합니다. 그 결과 SG 하나를 추가하는 작업이 입력 map에 항목 하나를 추가하는 작업으로 단순화됐습니다.</p>
+<h3 id="iam-role은-한-객체로">IAM Role은 한 객체로</h3>
+<p>Role도 같은 원칙으로, Role 하나에 필요한 trust relationship과 managed policy, inline policy를 모두 한 객체 안에 선언하도록 입력 구조를 변경했습니다. 입력은 단순해졌지만 내부 구현은 반대로 복잡해졌는데, Role 안에 inline policy가 있고 그 안에 다시 statement가 있는 세 단계 중첩 구조를 모듈 호출에 맞게 전개해야 했기 때문입니다. Role 모듈이 Role을 반복 생성하고, inline policy 모듈은 Role마다 다시 반복하면서 policy 목록과 statement 목록을 인덱스로 매칭해 전달합니다. 이 중첩 반복을 구성하는 부분이 가장 까다로워 상당히 고전했습니다. 결과는 Role 이름과 ARN의 map으로 출력하는데, 복잡도를 사용자 대신 모듈 내부가 부담하도록 한 셈입니다.</p>
+<h3 id="fargate-배치와-접근-권한">Fargate 배치와 접근 권한</h3>
+<p>Fargate에 어떤 Pod를 배치할지는 namespace와 label 두 조건으로 결정했습니다. kube-system, karpenter, default를 기본 namespace로 지정하고 변수로 추가할 수 있게 했는데, 그중에서도 fargate=true 라벨이 지정된 Pod만 Fargate에서 실행됩니다. CoreDNS는 EKS addon 설정에서 computeType을 Fargate로 지정하고 동일한 라벨을 지정해 이 조건에 해당하도록 했고, addon을 업데이트할 때 기존 설정이 덮어써지지 않도록 <code>resolve_conflicts_on_update</code>는 PRESERVE로 설정했습니다.</p>
+<p>클러스터 접근 권한은 EKS access entry로 관리했습니다. IAM 사용자 ARN 목록만 변수로 전달하면 사용자마다 클러스터 범위의 AmazonEKSClusterAdminPolicy가 연결된 access entry가 생성됩니다. 리소스 이름은 공통 네이밍 모듈에서 전달받아 클러스터, Fargate profile, SG, Role 이름이 모두 동일한 규칙을 따르도록 했습니다.</p>
+<h2 id="결과">결과</h2>
+<p>이 구조로 실제 EKS 클러스터를 구축했습니다. 클러스터를 생성한 뒤에 추가되는 IAM Role과 Security Group은 클러스터 state를 변경하지 않고 apply할 수 있게 됐고, EKS로 전환하는 과정에서 클러스터와 연관된 불필요한 인프라 충돌이나 수동 작업도 감소했습니다. SG와 Role을 입력 map에 항목 하나를 추가하는 방식으로 정의할 수 있게 되면서, Terraform 코드로 관리하는 SG와 Role의 범위도 확대됐습니다.</p>
+<p>Role, SG, KMS 키를 클러스터 state 외부에 분리했기 때문에, 이후 클러스터를 업데이트하거나 교체할 때 주변 리소스는 재사용하고 클러스터만 교체하는 블루그린 방식을 적용할 수 있는 구조도 확보하게 됐습니다.</p>
+<h2 id="돌아보며">돌아보며</h2>
+<p>처음 한 번의 불편을 감수하고 자주 변경되는 리소스를 클러스터와 분리했는데, state를 분리할 때 리소스 종류보다 변경 빈도를 기준으로 삼은 것이 적절했습니다. 입력을 단순화한 대가는 모듈 내부의 중첩 반복으로 나타났고, 작성한 저도 혼동할 정도였습니다. 또한 IAM Role과 SG를 먼저, 클러스터를 마지막에 apply하고 클러스터 생성 뒤에 OIDC Provider ARN을 Role에 연동하는 순서는 아직 수동으로 관리해야 합니다.</p>
+<p><b>기술 스택</b>: Terraform, Amazon EKS, AWS IAM</p>
+
+</div>
+</article>
+<footer class="footer">© 김형준 | <a href="mailto:kimhyju703@naver.com">kimhyju703@naver.com</a></footer>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict", flowchart: { useMaxWidth: false }, sequence: { useMaxWidth: false } });</script>
+</body>
+</html>

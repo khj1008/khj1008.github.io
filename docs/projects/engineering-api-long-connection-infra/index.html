@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>장시간 연결을 받는 엔지니어링 API 환경 구축 | 김형준</title>
+<meta name="description" content="하루를 넘길 수 있는 API 연결을 수용하기 위해 LB를 제외하고 httpd 프록시와 ECS External로 구성한 개발 환경">
+<meta property="og:type" content="website">
+<meta property="og:title" content="장시간 연결을 받는 엔지니어링 API 환경 구축 | 김형준">
+<meta property="og:description" content="하루를 넘길 수 있는 API 연결을 수용하기 위해 LB를 제외하고 httpd 프록시와 ECS External로 구성한 개발 환경">
+<meta property="og:url" content="https://khj1008.github.io/projects/engineering-api-long-connection-infra/">
+<link rel="canonical" href="https://khj1008.github.io/projects/engineering-api-long-connection-infra/">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<main class="page narrow">
+<nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
+<article>
+<h1 class="post-title">장시간 연결을 받는 엔지니어링 API 환경 구축</h1>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">ECS Anywhere</span><span class="tag">Apache httpd</span><span class="tag">WebSocket</span></dd><dt>분야</dt><dd><span class="tag">인프라 설계</span></dd><dt>한 줄 요약</dt><dd>하루를 넘길 수 있는 API 연결을 수용하기 위해 LB를 제외하고 httpd 프록시와 ECS External로 구성한 개발 환경</dd><dt>핵심 역량</dt><dd><span class="tag">클라우드 인프라</span></dd></dl>
+<div class="content">
+<h2 id="왜-이-작업이-필요했나">왜 이 작업이 필요했나?</h2>
+<p>개발팀에서 엔지니어링 솔루션용 API 서버를 배포할 인프라 환경을 요청받았습니다. 요청서 내용 자체는 일반적인 수준이었는데, Deno 런타임 기반 컨테이너 이미지를 Bitbucket Pipelines로 빌드하고, HTTP/HTTPS로 REST API와 웹 페이지를 제공하면서 별도 포트로 웹소켓 연결도 수용한다는 내용이었습니다. 개발, 스테이징, 프로덕션 3단계 환경과 브랜치별 배포 연동도 함께 검토해 달라고 요청했습니다.</p>
+<p>초기 구성안은 사내 표준을 그대로 따랐습니다. LB 뒤 대상 그룹에 인스턴스를 배치하고 HTTP, HTTPS, 웹소켓 포트를 일괄 수신하는 형태입니다. 그런데 요청서만으로는 이 API에 어떤 트래픽이 유입되는지 판단하기가 어려웠습니다. 구축에 착수하기 전에 개발팀과 회의를 마련하고, 사용자가 이 API를 어떤 시나리오로 사용하는지와 이때 송수신하는 데이터의 규모를 중심으로 문의했고, 소켓 통신이 반드시 필요한 이유도 함께 확인했습니다.</p>
+<figure><img src="/assets/img/engineering-api/01.png" alt="최초 검토한 표준 구성안. LB 뒤 대상 그룹이 HTTP, HTTPS, 웹소켓 포트를 함께 수신하는 구조" loading="lazy"><figcaption>최초 검토한 표준 구성안. LB 뒤 대상 그룹이 HTTP, HTTPS, 웹소켓 포트를 함께 수신하는 구조</figcaption></figure>
+<p>회의에서 확인한 답변으로 설계 방향이 전환됐습니다. API를 호출한 뒤 결과를 수신하기까지 <b>하루를 넘길 수도 있다</b>는 것이었고, API와 웹소켓으로 송수신하는 모델 파일도 GB 단위에 달할 수 있다고 했습니다. ALB의 idle timeout은 최대 4000초라서, 경로에 LB가 하나라도 포함되어 있으면 이러한 연결은 유지할 수 없습니다. 웹소켓 연결 문제 때문에 우선 EC2 한 대에 서비스를 배포하고 scale-out은 하지 않는 환경으로 시작한다는 방침도 이 자리에서 결정했습니다. 짧은 요청을 LB로 분산 처리하는 일반적인 웹 서비스 모델이 적합하지 않았고, 장시간 연결을 유지하는 경로가 최우선으로 충족해야 할 조건이 됐습니다.</p>
+<p>EC2 한 대, scale-out 없음이라는 전제는 회의에서 함께 결정한 것이고, 저는 그 전제 위에서 구성 방식을 선정하고 실제로 구축하는 업무를 담당했습니다. ECS 실행 방식 선택과 WAS 인스턴스 등록, WEB과 WAS 분리, httpd 리버스 프록시 설정, 그리고 LB를 제외하면서 발생한 SSL과 포트, 진입 IP 처리까지가 제 담당이었습니다.</p>
+<h2 id="어떻게-해결했나">어떻게 해결했나</h2>
+<h3 id="lb를-경로에서-제외하기">LB를 경로에서 제외하기</h3>
+<p>사내 표준 구조는 LB, WEB, 내부 LB, WAS 순서로 요청이 전달됩니다. 어느 구간이든 LB가 포함되면 idle timeout 상한의 제약을 받기 때문에, LB를 모두 제거하고 WEB에서 WAS로 직접 연결하는 구조를 선택했습니다. 그렇다고 서비스를 외부에 그대로 노출하지는 않았습니다. 서비스는 private 서브넷에 배치하고, 외부 진입점인 프록시만 public 서브넷에 배치하는 분리 구조는 그대로 유지했습니다.</p>
+<p>이렇게 변경하면 표준 구조에서 LB가 담당하던 역할이 다른 구성 요소로 이전됩니다. 외부 진입점은 WEB 인스턴스에 연결한 고정 IP(Elastic IP)와 DNS 레코드로 대체했고, SSL은 WEB 서버의 httpd가 직접 처리하게 했습니다. WEB에서 WAS로 연계할 때는 내부 LB 없이 httpd 리버스 프록시가 WAS의 내부 DNS 이름으로 직접 요청을 전달합니다. 연결 유지 시간도 이제는 LB 설정이 아니라 httpd vhost별 Timeout으로 직접 설정하게 됐습니다.</p>
+<h3 id="컨테이너는-ecs-external-인스턴스로">컨테이너는 ECS External 인스턴스로</h3>
+<p>서비스는 컨테이너로 배포하되, 실행 위치는 직접 생성한 EC2 한 대여야 했습니다. 이 조건으로 ECS의 실행 방식 세 가지를 비교 검토했습니다. EC2 launch type은 Auto Scaling Group을 연결해야 하는데, scale-out을 하지 않기로 한 상황이라 불필요한 구성이었습니다. Fargate로 고사양 task 하나를 실행하는 방법도 고려했지만, 검토 당시 파악한 task 1개의 상한(4 vCPU, 30GB 메모리)으로는 이후 확장에 한계가 있다고 판단했습니다.</p>
+<p>남은 선택지는 ECS Anywhere의 EXTERNAL launch type이었습니다. 별도로 관리하는 Linux 서버나 EC2를 ECS 서비스에 연결하는 방식이라, 인스턴스는 직접 생성하고 컨테이너는 태스크 정의와 서비스로 관리할 수 있습니다. EXTERNAL은 networking, load balancer, tag propagation을 지원하지 않는다는 제약이 있는데, 이번 구조는 처음부터 LB를 사용하지 않으므로 이 제약과 충돌할 일이 없었습니다. 서비스는 기존 Fargate 서비스들이 실행 중이던 동일한 ECS 클러스터에 External 서비스로 등록했습니다.</p>
+<figure><img src="/assets/img/engineering-api/02.png" alt="EXTERNAL launch type은 networking, load balancer, tag propagation을 지원하지 않음" loading="lazy"><figcaption>EXTERNAL launch type은 networking, load balancer, tag propagation을 지원하지 않음</figcaption></figure>
+<p>최종 구성은 다음과 같습니다.</p>
+<pre class="mermaid">flowchart LR
+    C[&quot;클라이언트&quot;] --&gt;|&quot;HTTPS / WSS&quot;| DNS[&quot;DNS 레코드, Elastic IP&quot;]
+    subgraph PUB[&quot;Public 서브넷&quot;]
+        WEB[&quot;WEB EC2&lt;br&gt;httpd 리버스 프록시, SSL 처리&quot;]
+    end
+    subgraph PRI[&quot;Private 서브넷&quot;]
+        WAS[&quot;WAS EC2&lt;br&gt;ECS External 인스턴스, API 컨테이너&quot;]
+    end
+    DNS --&gt; WEB
+    WEB --&gt;|&quot;REST vhost, Timeout 610초&quot;| WAS
+    WEB --&gt;|&quot;웹소켓 vhost, Timeout 86400초&quot;| WAS
+    WAS -.-&gt;|&quot;ECS agent 등록&quot;| ECS[&quot;ECS 클러스터&lt;br&gt;기존 Fargate 서비스와 공용&quot;]</pre>
+<h2 id="까다로웠던-부분">까다로웠던 부분</h2>
+<h3 id="사내-표준-ami를-컨테이너-호스트로-전환하기">사내 표준 AMI를 컨테이너 호스트로 전환하기</h3>
+<p>WAS는 사내 표준 애플리케이션 AMI로 private 서브넷에 생성했습니다(2 vCPU, 4GiB 메모리). 이 AMI에는 Java, Tomcat, httpd, APM 에이전트(Pinpoint)와 로그 파일이 기본으로 포함되어 있는데, 이번 서비스는 컨테이너로 배포할 예정이라 사용할 일이 없었습니다. 그래서 이 구성 요소들을 제거하고, Tomcat과 httpd는 서비스 등록까지 해제했습니다.</p>
+<p>그다음 ECS 콘솔에서 제공하는 External 인스턴스 등록 명령을 인스턴스에서 실행하면 Docker와 ECS agent가 설치되고, 클러스터의 인스턴스 목록에 External 인스턴스로 표시됩니다. 이 인스턴스를 대상으로 EXTERNAL launch type 서비스와 태스크를 생성해 컨테이너를 실행했습니다.</p>
+<figure><img src="/assets/img/engineering-api/03.png" alt="등록을 완료한 WAS가 External 인스턴스로 표시된 모습" loading="lazy"><figcaption>등록을 완료한 WAS가 External 인스턴스로 표시된 모습</figcaption></figure>
+<h3 id="rest와-웹소켓의-timeout을-분리하기">REST와 웹소켓의 timeout을 분리하기</h3>
+<p>WEB 서버는 public 서브넷에 소형 인스턴스로 배치하고, httpd에 vhost를 두 개 구성했습니다. 짧게 완료되는 REST 요청과 장시간 유지되는 소켓 연결을 하나의 timeout으로 일괄 처리하지 않기 위해서였습니다.</p>
+<p>REST와 웹 페이지를 처리하는 HTTPS vhost는 <code>Timeout 610</code>으로 설정하고, HSTS 헤더와 쿠키의 Secure, HttpOnly 속성을 적용했습니다. SSL을 WEB에서 종료하기 때문에 원래 요청이 어떤 프로토콜과 포트로 유입됐는지는 X-Forwarded-Proto, X-Forwarded-Port 헤더에 담아 WAS로 전달했습니다.</p>
+<p>웹소켓 전용 포트의 vhost는 Timeout을 86400초, 즉 하루로 설정했습니다. 이 vhost는 쿼리스트링에 <code>transport=websocket</code>이 포함된 요청만 RewriteRule로 선별해 ws 프로토콜로 터널링하고, 나머지 요청은 일반 HTTP로 프록시하도록 했습니다.</p>
+<h3 id="lb가-담당하던-역할을-서버가-직접-처리하기">LB가 담당하던 역할을 서버가 직접 처리하기</h3>
+<p>LB를 제거하자 LB가 자동으로 처리하던 작업이 모두 서버의 역할로 이전됐습니다. 먼저 SSL 인증서를 서버에 직접 적용해야 했는데, 무료 인증서 발급 서비스에서 90일 유효 인증서를 발급받아 S3를 경유해 서버로 전송하고, httpd SSL 설정에 인증서와 개인 키, 체인 파일을 지정했습니다.</p>
+<p>포트도 문제였습니다. httpd를 root가 아닌 계정으로 실행하면 80, 443 같은 특권 포트를 사용할 수 없습니다. 이 문제는 iptables NAT 규칙으로 80과 443으로 유입되는 트래픽을 httpd가 수신 대기 중인 비특권 포트로 전달하는 방식으로 해결했습니다. 마지막으로 WEB 인스턴스에 Elastic IP를 할당하고 서비스 도메인의 DNS 레코드를 이 IP로 연결해서 진입점을 고정했습니다.</p>
+<h2 id="결과">결과</h2>
+<p>개발 환경에서 엔지니어링 API 컨테이너가 ECS External 인스턴스 위에서 정상적으로 실행됐고, 도메인에서 Elastic IP와 WEB의 httpd를 경유해 WAS의 컨테이너까지 연결되는 경로가 완성됐습니다. 경로에서 LB를 제외했기 때문에 <b>LB idle timeout(최대 4000초)이라는 구조적인 상한이 제거됐고</b>, 연결 유지 시간은 이제 httpd vhost별 Timeout으로 직접 조절합니다. REST와 웹소켓도 vhost로 분리되어 있어서 짧은 요청과 긴 연결에 서로 다른 timeout을 적용할 수 있습니다.</p>
+<p>인스턴스는 직접 관리하게 됐지만, 배포는 기존 ECS 클러스터의 태스크 정의와 서비스 단위로 관리하는 형태를 그대로 유지할 수 있었다는 점도 장점이었습니다.</p>
+<h2 id="돌아보며">돌아보며</h2>
+<p>요청서에 적힌 대로 표준 구조부터 적용했다면, 장시간 연결이 중단되는 문제는 구축을 모두 완료한 뒤에야 발견했을 수도 있습니다. 결과까지 얼마나 소요되는지, 무엇을 얼마나 송수신하는지를 먼저 문의한 것이 결국 구조를 결정했습니다. 그리고 LB 같은 관리형 구성 요소를 하나 제외하면 SSL이나 특권 포트, 고정 진입 IP처럼 그 구성 요소가 대신하던 역할이 그대로 서버로 이전된다는 점도 이번에 확인했습니다.</p>
+<p><b>기술 스택</b>: ECS Anywhere(EXTERNAL launch type), Apache httpd, WebSocket</p>
+
+</div>
+</article>
+<footer class="footer">© 김형준 | <a href="mailto:kimhyju703@naver.com">kimhyju703@naver.com</a></footer>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict", flowchart: { useMaxWidth: false }, sequence: { useMaxWidth: false } });</script>
+</body>
+</html>

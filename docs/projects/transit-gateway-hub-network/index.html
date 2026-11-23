@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transit Gateway로 멀티 계정 네트워크 정리 | 김형준</title>
+<meta name="description" content="Peering을 제거해 계정 간 경로를 Transit Gateway로 통합하고, 신규 계정은 RAM 공유로 사내망에 연결">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Transit Gateway로 멀티 계정 네트워크 정리 | 김형준">
+<meta property="og:description" content="Peering을 제거해 계정 간 경로를 Transit Gateway로 통합하고, 신규 계정은 RAM 공유로 사내망에 연결">
+<meta property="og:url" content="https://khj1008.github.io/projects/transit-gateway-hub-network/">
+<link rel="canonical" href="https://khj1008.github.io/projects/transit-gateway-hub-network/">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<main class="page narrow">
+<nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
+<article>
+<h1 class="post-title">Transit Gateway로 멀티 계정 네트워크 정리</h1>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">Transit Gateway</span><span class="tag">RAM</span><span class="tag">Site-to-Site VPN</span></dd><dt>분야</dt><dd><span class="tag">인프라 설계</span></dd><dt>한 줄 요약</dt><dd>Peering을 제거해 계정 간 경로를 Transit Gateway로 통합하고, 신규 계정은 RAM 공유로 사내망에 연결</dd><dt>핵심 역량</dt><dd><span class="tag">클라우드 인프라</span></dd></dl>
+<div class="content">
+<p>사내망과 타 계정으로 서로 다른 경로를 사용하던 멀티 계정 네트워크를 Transit Gateway 하나로 통합한 경험을 정리했습니다. 전환 직후 APM 데이터가 중단된 원인과, 신규 계정을 RAM 공유로 사내망에 연결한 방법도 함께 다룹니다.</p>
+<h2 id="왜-이-작업이-필요했나">왜 이 작업이 필요했나?</h2>
+<p>저희 통합 AWS 환경에는 여러 서비스 계정이 속해 있고, 모든 VPC가 사내망과 통신하기 위해 허브 계정의 Transit Gateway(이하 TGW)에 연결되어 있었습니다. 사내망과는 이 TGW에 연결된 IPSec Site-to-Site VPN 하나로 통신합니다. 그런데 계정 간에는 다른 경로를 사용했는데, 주로 공용 인프라 계정의 MSK에 접근하기 위해 여러 계정이 공용 인프라 계정과 VPC Peering을 별도로 맺고 있었습니다. 사내망과 통신할 때는 TGW를, 타 계정과 통신할 때는 Peering을 사용하는 이원화된 구조라 관리 포인트가 이중이었습니다.</p>
+<p>신규 계정을 사내망에 연결하는 일도 부담이 컸습니다. 계정마다 Customer Gateway와 TGW를 새로 구축하고 VPC attachment와 VPN attachment를 생성한 다음, 함께 생성된 VPN 설정 파일을 사내 네트워크 담당자에게 전달해 온프레미스 장비에 터널을 새로 구성받아야 했습니다. 계정이 하나 추가될 때마다 VPN 터널과 시간당 과금되는 리소스도 함께 증가하는 구조였습니다.</p>
+<p>제약도 있었습니다. 일부 Fargate 서비스는 Outbound 규칙에서 MSK의 Security Group ID를 직접 참조하고 있었는데, 당시 TGW 경로에서는 상대 VPC의 SG ID를 규칙에서 참조할 수 없어서 접근 제어를 IP 대역 기준으로 재작성해야 했습니다. 현재는 Inbound 규칙에 한해 지원되지만 Outbound는 여전히 미지원이라, 이런 경우는 현재도 IP 기반 규칙이 필요합니다. 또 AWS Organization은 외부 MSP가, 온프레미스 방화벽은 사내 네트워크 담당자가 관리하고 있어서 해당 작업은 각 담당자에게 요청해 처리했습니다.</p>
+<p>TGW 허브와 사내망 VPN은 이 작업 전부터 운영되던 구성이고 도입 결정도 제가 하지 않았습니다. 저는 그 위에서 중복된 Peering 경로를 제거하는 일을 담당해 대안 비교부터 전환 작업, 전환 후 발생한 장애의 원인 분석까지 진행했고, 신규 계정을 RAM 공유로 연결하는 절차도 직접 수행하고 문서로 정리했습니다.</p>
+<h2 id="허브-하나로-통합할지-검토하기">허브 하나로 통합할지 검토하기</h2>
+<h3 id="연결마다-별도로-구성할까-허브에-통합할까">연결마다 별도로 구성할까, 허브에 통합할까</h3>
+<p>비교는 VPC 3개가 서로 모두 통신하고, 사내망도 3개 VPC와 모두 통신해야 하는 상황을 가정해 진행했습니다. Peering 방식이라면 VPC 간 Peering 3개에 VPC마다 Virtual Private Gateway와 VPN을 하나씩 구성해야 하고, Route Table의 target도 Peering과 VPN Gateway가 혼재하게 됩니다. TGW 허브라면 TGW 하나에 VPC attachment 3개, VPN attachment 1개로 충분하고 target은 TGW 하나로 통일됩니다. VPC가 N개로 증가하면 full-mesh Peering은 N(N-1)/2개, VPN은 N개로 증가하지만 TGW는 attachment N+1개로 선형으로 증가합니다.</p>
+<figure><img src="/assets/img/transit-gateway/01.png" alt="Peering 방식. VPC 간 Peering 3개와 VPC마다 VPN 연결" loading="lazy"><figcaption>Peering 방식. VPC 간 Peering 3개와 VPC마다 VPN 연결</figcaption></figure>
+<figure><img src="/assets/img/transit-gateway/02.png" alt="Transit Gateway 허브 방식. TGW 하나에 VPC attachment 3개, VPN attachment 1개" loading="lazy"><figcaption>Transit Gateway 허브 방식. TGW 하나에 VPC attachment 3개, VPN attachment 1개</figcaption></figure>
+<p>TGW의 단점도 검토했습니다. 모든 VPC가 서로 연결된다는 점은 TGW Route Table과 NACL로 제어할 수 있었고, attachment당 대역폭 상한(당시 50Gbps)은 저희 트래픽 규모에서 제약이 되지 않았습니다. SG 참조가 지원되지 않는 부분은 AWS Support에 문의했는데, 당시에는 미지원에 일정도 미정이었고 Prefix List를 생성해 공유하는 방법을 안내받았습니다. 그 결과 남은 쟁점은 비용이었습니다.</p>
+<h3 id="새로-구축한다면-tgw의-비용이-더-높았다">새로 구축한다면 TGW의 비용이 더 높았다</h3>
+<p>같은 시나리오에서 한 달(720시간) 동안 VPC 간 1,000GB, VPN으로 1,000GB를 전송한다고 가정하고 당시 서울 리전 단가로 계산했습니다.</p>
+<table>
+<thead>
+<tr>
+<th>월 비용</th>
+<th>VPC Peering + VPC별 VPN</th>
+<th>Transit Gateway 허브</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VPC attachment (시간당 0.07달러)</td>
+<td>0달러</td>
+<td>151.2달러 (3개)</td>
+</tr>
+<tr>
+<td>VPN 연결 (시간당 0.05달러)</td>
+<td>108달러 (3개)</td>
+<td>36달러 (1개)</td>
+</tr>
+<tr>
+<td>TGW VPN attachment (시간당 0.07달러)</td>
+<td>해당 없음</td>
+<td>50.4달러</td>
+</tr>
+<tr>
+<td>데이터 전송 (VPC 간 GB당 0.02달러, VPN GB당 0.126달러)</td>
+<td>146달러</td>
+<td>146달러</td>
+</tr>
+<tr>
+<td>합계</td>
+<td>254달러</td>
+<td>383.6달러</td>
+</tr>
+</tbody>
+</table>
+<p>데이터 전송비는 동일하고 차이는 시간당 과금에서 발생했는데, 처음부터 새로 구축한다면 <b>TGW의 비용이 약 1.5배 높은 셈</b>이었습니다. 과금 주체도 달라서 VPC attachment 비용은 VPC 소유 계정에, VPN 연결 비용은 TGW 소유 계정에 청구됩니다. 실제 금액은 AZ 배치 같은 세부 조건에 따라 달라질 수 있습니다.</p>
+<p>그런데 이 표는 "처음부터 새로 구축한다면"에 대한 답이었고, 저희가 답해야 하는 질문은 "이미 부담하고 있는 비용 위에서 무엇을 제거할까"였습니다. 모든 VPC가 사내망 통신 때문에 이미 TGW attachment 비용을 부담하고 있었으므로, Peering을 제거해도 고정비는 증가하지 않고 VPC 간 데이터 단가도 동일했습니다. 반대로 VPC마다 사내망 VPN을 별도로 구성하는 방식은 VPC가 증가할수록 감당하기 어려워집니다. 경로가 하나로 통합되면 라우팅을 판단할 지점이 TGW Route Table 한 곳으로 일원화된다는 점도 장점이었습니다.</p>
+<h3 id="ram으로-tgw를-공유하면">RAM으로 TGW를 공유하면</h3>
+<p>신규 계정 연결은 허브 계정의 TGW를 AWS RAM으로 공유하는 방식으로 전환했습니다. 이렇게 하면 신규 계정은 자체 TGW나 VPN 없이 공유받은 TGW에 VPC attachment만 연결하면 되고, 사내 네트워크 담당자도 터널을 새로 구성하는 대신 방화벽 정책만 허용해 주면 됩니다.</p>
+<p>허브 TGW는 공유 attachment 자동 수락을 비활성화해 두었습니다. 신규 계정의 attachment는 Pending Acceptance 상태로 대기하다가 허브 계정이 수락해야 연결되므로, 어떤 VPC가 사내망 경로에 편입되는지 허브에서 한 번 확인하는 지점이 마련됩니다. 또 attachment 서브넷은 VPC당 AZ마다 하나만 지정할 수 있어서, AZ별로 대표 Private 서브넷 하나를 지정하고 나머지 서브넷은 Route Table에 TGW 경로만 추가했습니다. 이 구조가 뒤에서 다룰 장애와 연결됩니다.</p>
+<pre class="mermaid">flowchart LR
+    ONPREM[&quot;온프레미스 사내망&quot;]
+    subgraph HUB[&quot;허브 계정&quot;]
+        TGW{{&quot;Transit Gateway (RAM으로 공유)&quot;}}
+    end
+    subgraph SHARED[&quot;공용 인프라 계정&quot;]
+        VPCS[&quot;공용 인프라 VPC (MSK 등)&quot;]
+    end
+    subgraph SVC[&quot;서비스 계정&quot;]
+        VPCA[&quot;서비스 VPC (Fargate 등)&quot;]
+    end
+    subgraph NEW[&quot;신규 계정&quot;]
+        VPCN[&quot;신규 서비스 VPC&quot;]
+    end
+    ONPREM &lt;--&gt;|&quot;Site-to-Site VPN 1개&quot;| TGW
+    TGW &lt;--&gt;|&quot;VPC attachment&quot;| VPCS
+    TGW &lt;--&gt;|&quot;VPC attachment&quot;| VPCA
+    TGW &lt;--&gt;|&quot;VPC attachment (허브 수락 후)&quot;| VPCN
+    VPCA -.-&gt;|&quot;전환 전 VPC Peering (제거)&quot;| VPCS</pre>
+<h2 id="까다로웠던-부분">까다로웠던 부분</h2>
+<h3 id="규칙을-먼저-변경하고-경로를-전환하기">규칙을 먼저 변경하고 경로를 전환하기</h3>
+<p>경로를 TGW로 전환하는 순간 SG ID 참조가 동작하지 않게 되므로, 규칙 변경을 가장 먼저 진행했습니다. Fargate Outbound 규칙에서 MSK의 SG ID를 참조하던 부분을 공용 인프라 계정 VPC의 CIDR 대역으로 변경하고, 그다음 상대 VPC 대역의 Route Table target을 Peering에서 TGW로 전환했습니다. 마지막으로 해당 Peering을 참조하는 Route Table이 남아 있지 않은지 콘솔에서 확인한 뒤 Peering을 삭제했습니다.</p>
+<h3 id="apm-데이터가-수집되지-않는다">APM 데이터가 수집되지 않는다</h3>
+<p>전환 직후 APM(Pinpoint)에 에이전트 데이터가 수집되지 않았습니다. 출발지와 수집 서버 양쪽의 SG, Route Table, NACL에 TGW Route Table까지 일곱 지점을 모두 점검했지만 설정상 문제는 발견되지 않았고, VPC Reachability Analyzer도 "도달 가능"으로만 판정했습니다.</p>
+<p>단서는 AWS Support 케이스 답변을 계기로 발견한 TGW 문서의 한 문장이었습니다. TGW는 attachment에 지정한 서브넷의 IP 하나를 사용해 그 서브넷에 네트워크 인터페이스(ENI)를 생성합니다. ENI는 AZ마다 대표 서브넷 하나에만 존재하므로, 같은 AZ의 다른 서브넷에서 송신되는 패킷도 TGW에서 수신되는 패킷도 모두 이 ENI를 거치게 되고, 최악의 경우 송신 측과 수신 측 모두 인접 서브넷의 ENI를 경유합니다. NACL은 서브넷 경계에서 평가되므로 대표 서브넷의 NACL 관점에서는 TGW로 송신되는 트래픽이 Inbound로, 수신되는 트래픽이 Outbound로 인식됩니다.</p>
+<figure><img src="/assets/img/transit-gateway/03.png" alt="VPC attachment를 생성할 때는 AZ마다 서브넷을 하나만 지정 가능" loading="lazy"><figcaption>VPC attachment를 생성할 때는 AZ마다 서브넷을 하나만 지정 가능</figcaption></figure>
+<figure><img src="/assets/img/transit-gateway/04.png" alt="최악의 경우 송신 측과 수신 측 모두 인접 서브넷의 ENI를 경유하는 경로" loading="lazy"><figcaption>최악의 경우 송신 측과 수신 측 모두 인접 서브넷의 ENI를 경유하는 경로</figcaption></figure>
+<p>Peering에서는 "송신 서브넷은 Outbound, 수신 서브넷은 Inbound만 허용하면 된다"는 가정이 유효했지만, TGW를 경유하면 이 가정이 성립하지 않습니다. 그동안 문제가 발견되지 않았던 이유는 NACL에 TCP 1024-65535가 기본으로 허용되어 있어서 대부분의 TCP 트래픽은 통과했기 때문이었고, 차단된 것은 UDP 9995번과 9996번 포트로 데이터를 전송하는 Pinpoint였습니다.</p>
+<p>경로상 서브넷의 NACL에서 이 UDP 포트를 Inbound와 Outbound 모두 허용해 해결했고, 운영 규칙으로도 정리했습니다. <b>TGW를 경유해 UDP나 ICMP 같은 TCP 외 프로토콜, 또는 22번이나 25번처럼 ephemeral 범위 외의 포트로 통신할 때는 NACL의 Inbound와 Outbound를 모두 허용합니다.</b></p>
+<h3 id="ram-공유로-신규-계정-연결하기">RAM 공유로 신규 계정 연결하기</h3>
+<p>저희는 Organization 안에서만 공유하도록 운영해서, MSP에 초대를 요청하고 신규 계정에서 수락하는 것부터 시작합니다. 그다음 허브 계정의 기존 TGW 리소스 공유에서 Shared Principals에 신규 계정을 추가하고, 신규 계정에서는 공유된 TGW에 AZ별 대표 Private 서브넷을 지정해 VPC attachment를 생성합니다. 허브 계정에서 Pending Acceptance 상태의 attachment를 수락한 뒤 TGW Route Table에 신규 VPC 대역이 Propagated로 반영됐는지 확인합니다. 사내 네트워크 담당자가 방화벽 정책을 허용하는 작업까지 완료돼야 사내망에서 접근할 수 있습니다.</p>
+<h2 id="결과">결과</h2>
+<p>중복되던 VPC Peering을 제거하고 Route Table target을 TGW로 통일하면서, 사내망 통신과 계정 간 통신을 동일한 TGW Route Table에서 관리하게 됐습니다. SG 규칙을 IP 대역 기준으로 변경해 두었기 때문에 TGW 경로에서도 접근 제어가 그대로 동작합니다. 전환 중 발생한 APM 수집 장애는 원인을 규명해 해결했고, 앞의 NACL 규칙을 문서로 정리했습니다.</p>
+<p>신규 계정을 사내망에 연결하는 일도 공유 TGW에 attachment를 연결하고 수락받는 절차로 간소화됐습니다. 당시 단가로 계산하면 신규 계정 하나당 VPN 연결(월 36달러)과 TGW VPN attachment(월 50.4달러)가 발생하지 않으므로 월 약 86달러가 절감되는 셈입니다. 다만 전환 전후의 실제 청구액은 별도로 측정하지 않았습니다.</p>
+<h2 id="돌아보며">돌아보며</h2>
+<p>관리형 네트워크 서비스도 결국 서브넷 안의 ENI로 동작하므로, 패킷이 실제로 어느 서브넷의 어떤 인터페이스를 경유하는지 도식화해 봐야 NACL을 올바르게 설계할 수 있었습니다. 이번에는 Reachability Analyzer의 "도달 가능"보다 TGW 동작 방식을 설명한 문서 한 문장이 결정적이었습니다. 비용도 "새로 구축하는 비용"으로 볼 때와 "이미 부담하는 비용 위에서 정리하는 비용"으로 볼 때 결론이 달랐습니다.</p>
+
+</div>
+</article>
+<footer class="footer">© 김형준 | <a href="mailto:kimhyju703@naver.com">kimhyju703@naver.com</a></footer>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict", flowchart: { useMaxWidth: false }, sequence: { useMaxWidth: false } });</script>
+</body>
+</html>

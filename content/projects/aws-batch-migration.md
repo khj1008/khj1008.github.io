@@ -1,0 +1,398 @@
+---
+title: AI 역량검사 영상 분석 서버 AWS Batch 전환기
+summary: GPU 영상 분석 서버를 EC2 직접 운영에서 AWS Batch on EKS로 전환해 분석 대기시간을 평균 227분에서 41분으로 단축
+field: 인프라 설계
+competency: traffic
+stack: AWS Batch, EKS, NVIDIA GPU
+order: 2
+---
+AI 역량검사 영상분석 서비스를 EC2 환경에서 AWS Batch on EKS로 전환하면서 분석 대기시간을 5.57배 단축한 경험을 공유합니다. EKS 클러스터에 Batch를 연동할 때 발생하는 노드 등록, GPU 플러그인, DaemonSet 스케줄링, 모니터링 에이전트 이슈까지 실전 트러블슈팅을 함께 다룹니다.
+
+![](https://cdn-images-1.medium.com/max/1024/1*THGjj6RhCXhT9pXyLcJEIA.png)
+
+## 왜 이 작업이 필요했나?
+
+저희는 채용 서비스를 운영하고 있고, 그 중 AI역량검사라는 제품이 있습니다. AI역량검사는 성향파악, 전략게임, 영상면접의 3단계로 구성된 종합 역량 평가 도구이고, 이 중 영상면접 단계에서는 지원자의 면접 영상을 AI로 분석하여 역량 평가 결과를 제공합니다.
+
+이 영상을 분석하는 서버(이하 solver)는 딥러닝 기반으로 동작하고 Python + GPU 환경에서 얼굴 인식, 음성 인식 등의 AI 모델을 실행해 분석 결과를 생성합니다.
+
+기존 아키텍처는 마스터 서버가 분석 대상을 조회하고 EC2 노드 수를 직접 조절하는 구조였고, 배포는 CodeDeploy, 파일 전달은 SSH로 이루어지고 있었습니다.
+
+이 구성의 문제는 <b>운영 복잡도와 비효율적인 자원 관리</b>였는데, 마스터 서버가 직접 EC2 노드 수를 관리하다 보니 스케일링 로직을 직접 구현하고 유지해야 했습니다. 채용 시즌처럼 분석 요청이 집중되면 병목이 발생하거나 메모리 부족으로 프로세스가 비정상 종료될 수 있고, 반대로 노드를 넉넉히 확보하면 유휴 자원이 낭비되는 딜레마가 있었습니다.
+
+여기에 분석 작업 자체가 건당 수십 분에서 시간 단위로 소요되는 <b>장시간 배치 워크로드</b>라는 특성까지 더해져서, 상시 운영 방식의 한계가 뚜렷했습니다.
+
+## AWS Batch를 선택한 이유
+
+요구사항은 크게 세 가지였습니다. 요청이 들어올 때만 리소스를 확보하고 처리가 완료되면 반환할 것, 각 분석 작업이 독립된 환경에서 실행되어 GPU 메모리가 격리될 것, 그리고 기존 EKS 클러스터를 그대로 활용할 수 있을 것. AWS Batch는 이 세 가지를 모두 충족했습니다.
+
+AWS Batch의 핵심 구성 요소는 다음과 같습니다.
+
+- <b>Job Definition</b>: 컨테이너 이미지, 리소스 요구사항 등을 정의한 템플릿
+- <b>Job</b>: 실제 실행할 작업으로, 제출 시점에 환경 변수 등을 오버라이드할 수 있음
+- <b>Job Queue</b>: 제출된 Job의 우선순위를 관리하는 대기열
+- <b>Compute Environment</b>: Job이 실행되는 컴퓨팅 환경으로, EKS 클러스터를 지정할 수 있음
+
+서비스에서 Job을 제출하면 Job Queue에서 대기하다가, Compute Environment가 EC2를 프로비저닝하고 EKS 노드로 등록해서 컨테이너를 실행하고, 완료되면 리소스를 반환하는 흐름인데, 이 일련의 과정이 전부 자동으로 이루어집니다.
+
+기대 효과도 명확했습니다. 필요한 만큼 자원을 확보하고 Array Job으로 병렬 처리가 가능해 <b>성능</b>이 향상되고, 작업별로 독립된 노드를 할당하므로 GPU 메모리 격리를 통한 <b>안정성</b>도 확보되며, 유휴 자원 없이 처리 후 즉시 반환하는 구조라 <b>비용</b> 절감까지 기대할 수 있었습니다.
+
+## EKS에 AWS Batch 연동하기
+
+이미 운영 중인 EKS 클러스터가 있었기 때문에, Batch의 Compute Environment를 EKS 타입으로 설정하는 방향으로 진행했습니다.
+
+## 기본 리소스 생성
+
+AWS Batch on EKS를 구성하려면 다음 리소스가 필요합니다.
+
+- <b>Compute Environment</b>: VPC, Subnet, Security Group, EKS 클러스터, Instance Role, Namespace 지정
+- <b>Job Queue</b>: Compute Environment를 연결
+- <b>Job Definition</b>: 컨테이너 이미지, 리소스 요청량, 서비스 어카운트 등 설정
+
+Compute Environment 설정 시 주의할 점이 몇 가지 있었는데, 먼저 <b>Spot 인스턴스는 사용하지 않았습니다.</b> 기존 EC2 운영 당시 Spot을 사용해 본 경험이 있는데, 한창 분석이 진행되는 중간에 인스턴스가 회수되면 새로운 EC2를 할당받아 처음부터 다시 분석을 실행해야 해서 오히려 더 비효율적이었고 비용 절감 효과도 없었습니다. 건당 수십 분\~시간 단위로 소요되는 워크로드 특성상 On-Demand가 적합합니다. 또한 <b>Allowed Instance Type을 명시</b>해서 Batch가 임의의 인스턴스를 프로비저닝하지 않도록 해야 합니다.
+
+## EKS 클러스터에 Batch 권한 부여
+
+AWS Batch가 EKS에 노드를 등록하고 Pod을 관리하려면 RBAC 설정이 필요합니다.
+
+먼저 ClusterRole과 ClusterRoleBinding을 생성합니다.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aws-batch-cluster-role
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aws-batch-cluster-role-binding
+subjects:
+  - kind: User
+    name: aws-batch
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: aws-batch-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+```
+
+Batch Job이 실행될 Namespace에는 Role과 RoleBinding도 추가해야 합니다. Namespace마다 각각 적용해야 합니다.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aws-batch-compute-environment-role
+  namespace: my-namespace
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list"]
+```
+
+그리고 aws-auth ConfigMap에 AWS Batch 서비스 연결 역할을 매핑합니다.
+
+```yaml
+- rolearn: arn:aws:iam::<ACCOUNT_ID>:role/AWSServiceRoleForBatch
+  username: aws-batch
+```
+
+여기까지가 공식 문서에 나와 있는 기본 설정입니다. 그런데 실제로 Job을 제출하면 여기서부터 문제가 시작됩니다.
+
+## 노드가 클러스터에 조인되지 않는다
+
+Job을 제출했더니 RUNNABLE 상태에서 멈춰 있었는데, Batch가 EC2를 프로비저닝하긴 했지만 그 노드가 EKS 클러스터에 조인하지 못하고 있었습니다.
+
+### 403 Forbidden — 노드 등록 거부
+
+CloudTrail의 감사 로그를 확인해 보니 다음과 같은 에러가 기록되어 있었습니다.
+
+```txt
+"status": "Failure",
+"message": "nodes is forbidden",
+"reason": "Forbidden",
+"code": 403
+```
+
+Batch가 프로비저닝한 EC2 인스턴스가 kubelet으로 클러스터에 등록하려 하는데, 권한이 없어서 거부되고 있었습니다.
+
+### IAM Access Entry에 Admin 권한 부여
+
+EKS 클러스터의 IAM Access Entries에 Batch 인스턴스 Role을 Admin 정책으로 추가해봤더니 노드가 조인되긴 했지만, 과도한 권한이라 프로덕션에 적용할 수는 없는 방법이었습니다.
+
+### aws-auth에 인스턴스 Role 매핑
+
+결국 aws-auth ConfigMap에 인스턴스 Role을 올바른 그룹으로 매핑하는 것이 해결책이었습니다.
+
+```yaml
+- rolearn: arn:aws:iam::<ACCOUNT_ID>:role/<BATCH_INSTANCE_ROLE>
+  username: system:node:{{EC2PrivateDNSName}}
+  groups:
+    - system:bootstrappers
+    - system:nodes
+    - system:node-proxier
+```
+
+핵심은 username을 system\:node\:\{\{EC2PrivateDNSName\}\} 템플릿으로 지정하는 것인데, 이렇게 해야 kubelet이 자신의 호스트네임으로 노드를 등록하고 CSR(Certificate Signing Request)도 정상적으로 자동 승인됩니다. 이 한 줄의 차이를 발견하는 데 상당한 시간이 소요됐는데, 처음에는 고정 username을 사용하거나 그룹을 잘못 지정해서 노드가 조인됐다가 CSR이 Pending 상태에 머무르거나, kubelet이 Ready 상태가 되지 않는 등의 시행착오를 겪었습니다.
+
+### Bottlerocket은 사용할 수 없다
+
+Batch에서 노드 이미지를 Bottlerocket으로 지정했더니 클러스터에 전혀 조인하지 못하는 문제도 있었는데, <b>Amazon 공식 EKS 최적화 AMI를 사용해야</b> 정상적으로 동작합니다.
+
+## DaemonSet이 Batch 노드에 스케줄링되지 않는 문제
+
+노드가 클러스터에 정상적으로 조인됐지만, Fluent Bit이나 Datadog Agent 같은 DaemonSet이 Batch 노드에 스케줄링되지 않는 문제가 있었는데, 원인은 Batch가 노드에 자동으로 추가하는 <b>Taint</b> 때문이었습니다.
+
+```yaml
+taints:
+  - key: batch.amazonaws.com/batch-node
+    effect: NoSchedule
+  - key: batch.amazonaws.com/batch-node
+    effect: NoExecute
+```
+
+Batch 노드에는 Batch Job만 실행되어야 하므로 일반 워크로드를 차단하는 Taint가 기본으로 적용되는데, DaemonSet이 이 노드에서도 실행되려면 해당 Taint에 대한 Toleration을 추가해야 합니다.
+
+### Toleration 추가
+
+Datadog Agent와 Fluent Bit의 DaemonSet에 다음 Toleration을 추가합니다.
+
+```yaml
+tolerations:
+  - key: "batch.amazonaws.com/batch-node"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "batch.amazonaws.com/batch-node"
+    operator: "Exists"
+    effect: "NoExecute"
+```
+
+### Node Affinity로 Batch 노드 식별
+
+Toleration만 추가하면 모든 노드에 스케줄링될 수 있으므로 Batch 노드를 구분할 수 있는 라벨이 필요한데, Launch Template의 userdata에서 커스텀 노드 라벨을 주입하는 방식으로 해결했습니다.
+
+```txt
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="MYBOUNDARY"
+```
+
+```txt
+--MYBOUNDARY
+Content-Type: text/x-shellscript; charset="us-ascii"
+```
+
+```bash
+#!/bin/bash
+mkdir -p /etc/aws-batch
+echo 'AWS_BATCH_KUBELET_EXTRA_ARGS="--node-labels batch.amazonaws.com/compute=true"' >> /etc/aws-batch/batch.config
+--MYBOUNDARY
+```
+
+그리고 DaemonSet의 Node Affinity에 이 라벨을 추가합니다.
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: batch.amazonaws.com/compute
+              operator: In
+              values:
+                - "true"
+```
+
+"true"를 반드시 문자열(큰따옴표)로 감싸야 합니다. 라벨 값이 문자열이기 때문입니다.
+
+## GPU Pod가 실행되지 않는다 — nvidia-device-plugin
+
+DaemonSet 스케줄링까지 해결하고 테스트 Job을 제출했는데, GPU를 사용하는 solver Pod가 Pending 상태에서 멈춰 있었습니다. 원인은 단순한데, Batch가 프로비저닝한 GPU 노드(g4dn)에 <b>nvidia-device-plugin DaemonSet이 없어서</b> Kubernetes가 노드의 GPU 리소스를 인식하지 못하고, <code>nvidia.com/gpu</code> 리소스를 요청하는 Pod가 스케줄링되지 않는 것이었습니다.
+
+NVIDIA의 공식 k8s-device-plugin을 Helm으로 설치해서 해결합니다.
+
+```yaml
+# values.yaml
+migStrategy: none
+failOnInitError: false
+namespaceOverride: "kube-system"
+```
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node.kubernetes.io/instance-type
+              operator: In
+              values: ["g4dn.large", "g4dn.xlarge", "g4dn.2xlarge", "g4dn.4xlarge"]
+```
+
+```yaml
+tolerations:
+  - key: "batch.amazonaws.com/batch-node"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "batch.amazonaws.com/batch-node"
+    operator: "Exists"
+    effect: "NoExecute"
+```
+
+```bash
+helm upgrade --install nvidia-device-plugin <chart> -n kube-system -f values.yaml
+```
+
+설정에서 유의할 사항이 몇 가지 있는데, migStrategy: none은 g4dn(T4 GPU)이 MIG를 지원하지 않기 때문이고, failOnInitError: false는 혼합 클러스터에서 GPU가 없는 노드에 스케줄링되더라도 크래시루프에 빠지지 않도록 하기 위함입니다. 그리고 Affinity에 GPU 인스턴스 타입을 명시해서 필요한 노드에만 배포되도록 하고, Batch 노드 Taint에 대한 Toleration도 앞서와 동일하게 추가해야 합니다.
+
+## Datadog Agent 호스트네임 문제
+
+DaemonSet이 Batch 노드에 스케줄링됐지만, Datadog Agent가 시작 직후 크래시하는 문제가 있었습니다.
+
+```txt
+Error: Error while getting hostname, exiting: unable to reliably determine the host name
+```
+
+Batch가 프로비저닝하는 EC2 인스턴스는 일반 EKS 노드와 호스트네임 해석 방식이 달라서, Datadog Agent가 기본 방법으로 호스트네임을 가져오지 못하는 것이 원인이었습니다. Launch Template userdata에 호스트네임 환경변수를 추가하고,
+
+```bash
+echo "DD_HOSTNAME=$(cat /etc/hostname)" >> /etc/environment
+```
+
+Datadog Agent의 DD\_HOSTNAME 환경변수를 노드 이름에서 가져오도록 설정하면 해결됩니다.
+
+```yaml
+env:
+  - name: DD_HOSTNAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+```
+
+## 컨테이너화와 17GB 이미지 문제
+
+Batch Job은 컨테이너 기반으로 실행되므로, 기존 EC2에 직접 배포하던 solver를 컨테이너화해야 했습니다.
+
+베이스 이미지는 NVIDIA의 공식 CUDA 이미지를 사용했는데, 기존 EC2에 직접 설치하던 CUDA, cuDNN 등의 라이브러리가 이미 포함되어 있어 환경 구성이 한층 간소화됐습니다. 다만 문제는 <b>이미지 크기</b>로, CUDA 베이스 이미지만 약 1.8GB인 데다 Python 라이브러리를 100개 이상 설치하면서 최종 이미지가 <b>약 17GB</b>에 달해서 Batch가 EC2를 프로비저닝한 뒤 이미지를 Pull하는 데 상당한 시간이 소요됐습니다.
+
+이미지 Pull 시간을 단축하기 위해 몇 가지 방법을 검토했습니다.
+
+<b>커스텀 AMI에 이미지를 프리로드</b>하는 방식이 가장 효과적이지만, 이미지가 업데이트될 때마다 AMI도 새로 생성해야 합니다. 유지보수 부담을 고려하여 이 방법은 채택하지 않았습니다.
+
+대신 <b>EBS 디스크 튜닝</b>으로 이미지 Pull과 언패킹 속도를 개선했습니다. Launch Template에서 루트 볼륨을 gp3로 지정하고, Throughput을 400 MiB/s, IOPS를 3000\~6000으로 상향합니다.
+
+ECR에서 이미지를 Pull하는 경로도 중요합니다. <b>VPC Endpoint를 설정하면 NAT Gateway를 경유하지 않고 직접 ECR에 접근</b>할 수 있어 Pull 속도가 향상되고, NAT Gateway 비용도 절감됩니다.
+
+다만 하나의 Job에서 여러 건의 분석을 처리하기 때문에, 이미지 Pull은 최초 1회만 발생합니다. 전체 처리 시간 대비 Pull 시간은 미미해서, 17GB라는 숫자가 주는 부담감에 비해 EBS 튜닝만으로도 충분히 수용 가능한 수준이었습니다.
+
+## 배포 파이프라인 수정
+
+기존 CodeDeploy 기반 배포를 컨테이너 이미지 빌드 + Job Definition 등록 방식으로 전환해야 했는데, Job Definition은 JSON 파일로 관리하는 형태입니다.
+
+```json
+{
+  "podProperties": {
+    "serviceAccountName": "my-service-account",
+    "hostNetwork": true,
+    "containers": [
+      {
+        "name": "solver",
+        "image": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/solver:<IMAGE_TAG>",
+        "imagePullPolicy": "Always",
+        "resources": {
+          "requests": {
+            "memory": "1024Mi",
+            "cpu": "1"
+          }
+        }
+      }
+    ],
+    "metadata": {
+      "labels": {
+        "environment": "<ENV>",
+        "tags.datadoghq.com/env": "<ENV>",
+        "tags.datadoghq.com/service": "solver-batch",
+        "admission.datadoghq.com/enabled": "true"
+      }
+    }
+  }
+}
+```
+
+파이프라인에서 환경 변수를 치환하고 Job Definition을 등록합니다.
+
+```bash
+# 환경변수 치환
+envsubst < jobdef-template.json > jobdef.json
+```
+
+```bash
+# Job Definition 등록
+aws batch register-job-definition \
+  --job-definition-name my-batch-job-definition \
+  --type container \
+  --eks-properties file://jobdef.json
+```
+
+배포 파이프라인은 변경 범위에 따라 두 가지로 분리했습니다. <b>컨테이너 이미지 재빌드가 필요한 변경</b>(Python 라이브러리 추가, 시스템 패키지 변경 등)의 경우 Docker 이미지를 빌드하고 ECR에 Push한 뒤 새 Job Definition을 등록하고, <b>소스 코드만 변경된 경우</b>(분석 로직 수정 등)에는 변경된 소스를 S3에 업로드하고 컨테이너가 시작 시 S3에서 최신 소스를 다운로드하는 방식으로 이미지 재빌드 없이 빠르게 배포할 수 있게 했습니다. 이미지 빌드에 수십 분이 소요되는 17GB 이미지 특성상, 이 분리는 운영 효율에 큰 차이를 만듭니다.
+
+서비스에서 Job을 제출할 때는 AWS SDK를 사용하는데, Job Definition ARN과 Job Queue 이름을 지정하고 필요한 환경 변수를 Container Override로 전달하는 방식입니다.
+
+## Terraform과 Pod Annotation
+
+운영 중에 발견한 한 가지 주의사항으로, Pod Annotation은 AWS 콘솔에서는 Job Definition에 정의할 수 있지만 <b>Terraform에서는 지원되지 않습니다.</b> Annotation을 통해 Pod에 IAM Role을 부여해야 하는 경우, 서비스에서 Job 제출 시 Container Override로 Annotation을 추가하거나, Job Definition의 Service Account에 IRSA(IAM Roles for Service Accounts)를 설정하는 두 가지 우회 방법이 있습니다. 저희는 기존에 사용하던 Service Account에 필요한 IAM 권한이 이미 바인딩되어 있었기 때문에, Job Definition에서 Service Account만 지정하는 것으로 해결했습니다.
+
+## 정리
+
+전환 전후를 비교하면, 기존에는 마스터 서버가 EC2 노드 수를 직접 조절하고 CodeDeploy + SSH로 배포하는 레거시 구조였다면, 전환 후에는 요청이 있을 때만 EC2를 프로비저닝하고 완료 후 즉시 반환하며, 작업별로 독립된 환경에서 컨테이너 기반으로 배포하는 구조가 되었습니다.
+
+비용 면에서는 실제 분석이 실행되는 만큼만 과금되는 구조로 전환되면서 유휴 자원이 해소된 효과가 컸고, 성능 면에서는 예상보다 더 큰 개선이 있었습니다. 배포 후 동일 조건(평시 24시간)에서 측정한 결과입니다.
+
+- <b>EC2 (기존)</b>: 응시 완료부터 분석 완료까지 평균 <b>약 227분</b>
+- <b>Batch (전환 후)</b>: 평균 <b>약 41분</b> — <b>5.57배 개선</b>
+- 최대 분석 대기시간도 687분에서 121분으로 5.67배 단축
+
+분석 자체의 속도가 빨라진 것이 아니라, 기존 EC2 환경에서는 여러 분석이 하나의 인스턴스에 순차적으로 적체되면서 대기 시간이 길어졌고, Spot 인스턴스를 사용했기 때문에 분석 도중에 자원이 회수되어 새 인스턴스를 할당받아 처음부터 재실행하는 경우도 빈번했습니다. Batch에서는 분석 요청마다 독립된 On-Demand 노드가 즉시 프로비저닝되면서 대기도, 중간에 회수되는 일도 발생하지 않게 된 결과입니다.
+
+다만 한 가지 트레이드오프가 있습니다. Batch가 EC2를 프로비저닝하고 EKS 노드로 등록하는 데 약 <b>3분</b> 정도 소요됩니다. 즉시 응답이 필요한 워크로드에는 적합하지 않지만, 하나의 Job에서 여러 건의 분석을 처리하기 때문에, 노드 프로비저닝과 Pod 구성에 소요되는 3분은 전체 처리 시간 대비 크게 체감되지 않았습니다.
+
+## 느낀 점
+
+EKS 위에 AWS Batch를 구성하는 것은 공식 문서만 보면 단순해 보이지만, 실제로는 노드 등록부터 DaemonSet 스케줄링, 모니터링 에이전트 호스트네임까지 여러 곳에서 예상치 못한 이슈가 발생합니다. 특히 aws-auth ConfigMap의 username 템플릿(system\:node\:\{\{EC2PrivateDNSName\}\})은 공식 문서에서 쉽게 찾기 어려운 부분이었고, Bottlerocket 비호환이나 Datadog 호스트네임 이슈는 직접 적용해 봐야 확인할 수 있는 사항이었습니다.
+
+한편으로는 한번 연동이 완료되고 나면 운영이 상당히 간소화되는데, Job을 제출하기만 하면 인프라 프로비저닝부터 정리까지 Batch가 자동으로 처리하고, EC2 AutoScaling 설정을 튜닝하고 유휴 인스턴스를 관리하던 운영 부담이 해소된 효과도 큽니다. 또한 제출된 Job의 현황을 한 눈에 파악할 수 있고, Job의 우선순위를 유연하게 조절 할 수 있어 VOC 대응도 수월해졌습니다.
+
+비용 측면에서도 하나 배운 점이 있는데, Spot이 항상 저렴하지는 않다는 것입니다. 건당 수십 분\~시간 단위로 소요되는 워크로드에서 Spot을 사용하면 중간에 회수되어 처음부터 재실행하는 비용이 오히려 더 커서, 서비스 성격에 따라서는 On-Demand가 훨씬 경제적일 수 있습니다.
+
+그리고 설령 비용 절감 효과가 기대만큼 크지 않더라도, 빨라진 분석 속도 덕분에 사용자가 결과를 더 빨리 받아볼 수 있다면 그 자체로 충분한 가치가 있다고 생각합니다.
+
+## 참고 자료
+
+- [https://docs.aws.amazon.com/batch/latest/userguide/getting-started-eks.html](https://docs.aws.amazon.com/batch/latest/userguide/getting-started-eks.html)
+- [https://docs.aws.amazon.com/batch/latest/APIReference/API\_SubmitJob.html](https://docs.aws.amazon.com/batch/latest/APIReference/API_SubmitJob.html)
+- [https://sdk.amazonaws.com/java/api/latest/software/amazon/awssdk/services/batch/BatchClient.html](https://sdk.amazonaws.com/java/api/latest/software/amazon/awssdk/services/batch/BatchClient.html)

@@ -1,0 +1,71 @@
+{
+  "title": "김형준 | DevOps Engineer",
+  "url": "https://khj1008.github.io",
+  "description": "채용 플랫폼과 AI 역량검사 서비스의 클라우드 인프라를 담당하고 있는 DevOps 엔지니어 김형준의 포트폴리오입니다.",
+  "intro": [
+    "채용 플랫폼과 AI 역량검사 서비스의 클라우드 인프라를 담당하고 있는 DevOps 엔지니어입니다. 여러 웹 애플리케이션이 실행되는 AWS 환경을 설계하고 운영합니다.",
+    "합격자 발표처럼 트래픽이 한순간에 집중되는 서비스를 운영하며, 장애를 사전에 방지하는 구조와 누가 인계받아도 흐름을 파악할 수 있는 인프라를 중요하게 생각합니다."
+  ],
+  "profile": {
+    "headline": "경력 7년차",
+    "lines": [
+      "마이다스인 DevOps 2021.07 – 현재",
+      "마이다스아이티 CAE 개발 2020.01 – 2021.06"
+    ],
+    "email": "kimhyju703@naver.com"
+  },
+  "competencies": [
+    {"key": "cloud", "label": "클라우드 인프라", "tab": "클라우드"},
+    {"key": "k8s", "label": "Kubernetes & IaC", "tab": "K8s & IaC"},
+    {"key": "traffic", "label": "트래픽 대응", "tab": "트래픽"},
+    {"key": "security", "label": "보안", "tab": "보안"},
+    {"key": "monitoring", "label": "모니터링", "tab": "모니터링"},
+    {"key": "engineering", "label": "엔지니어링 솔루션", "tab": "엔지니어링"}
+  ],
+  "career": [
+    {
+      "company": "마이다스인",
+      "role": "DevOps Engineer",
+      "period": "2021.07 – 현재",
+      "duties": [
+        "채용 플랫폼 및 AI 역량검사 서비스 인프라 메인 담당",
+        "메일 및 SMS 발송, 전체 웹 서비스 데이터베이스 관리",
+        "개발자 생산성 향상을 위한 플랫폼 개발 및 운영",
+        "클라우드 인프라 대상 ISMS 및 CSAP 보안 인증 대응"
+      ],
+      "achievements": [
+        "AI 역량검사 분석 서버 AWS Batch 전환, 분석 대기시간 평균 227분에서 41분으로 단축",
+        "Argo CD 플러그인 개발, Secret 및 이미지 태그를 Git 외부의 Parameter Store에서 주입",
+        "ECS에서 EKS로 전환하며 Terraform 모듈 재설계",
+        "Kafka 및 SES 기반 메일 발송 구조 재구축, 네이버 및 Gmail 정책 강화 대응",
+        "오픈소스 Teleport 기반 테스트 환경 DB 접근제어 및 감사 체계 구축",
+        "구축형 Elasticsearch 로그의 Datadog 무중단 이관",
+        "Self-hosted Runner 멀티플랫폼 빌드 및 S3 캐시 구성, Docker Build Cloud 의존성 제거",
+        "스냅샷과 DMS CDC를 조합한 AWS 계정 간 RDS 마이그레이션",
+        "그 밖에 통합 보안 대시보드, Transit Gateway 네트워크 정리, Argo CD SSO 연동, 중단 페이지 개선, 장시간 연결 API 환경 구축, Jenkins에서 Bitbucket Pipelines로의 전환, STT API GCP 전환, 중국 리전 API 인프라 구축"
+      ]
+    },
+    {
+      "company": "마이다스아이티",
+      "role": "CAE 소프트웨어 개발",
+      "period": "2020.01 – 2021.06",
+      "duties": [
+        "건설, 토목 및 기계 구조해석 솔루션의 MFC 기반 C++ 개발 및 유지보수",
+        "Shell Interface, Solver 연동, 시뮬레이션 로직 성능 최적화"
+      ],
+      "achievements": [
+        "Shell Interface 절점 분리 알고리즘 재설계, 생성 시간을 15분 이상에서 9초 이내로 단축",
+        "Civil 제품군 Solver 마이그레이션, 해석 정확도 및 사용성 개선"
+      ]
+    }
+  ],
+  "stack": [
+    ["클라우드", "AWS, GCP, NCP"],
+    ["IaC", "Terraform, Terragrunt"],
+    ["컨테이너", "Kubernetes(EKS), Docker, Helm, Kustomize"],
+    ["CI/CD", "Argo CD, Bitbucket Pipelines, Jenkins"],
+    ["모니터링 및 로깅", "Datadog, CloudWatch, Fluent Bit, ELK, Zabbix"],
+    ["데이터베이스", "RDS(MySQL, MariaDB), Aurora, DynamoDB"],
+    ["언어", "Python, Java, Bash, C++"]
+  ]
+}

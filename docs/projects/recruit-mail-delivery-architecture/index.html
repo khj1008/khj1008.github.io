@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>채용 플랫폼 메일 발송 아키텍처 재구축 | 김형준</title>
+<meta name="description" content="대량 발송이 지연되던 채용 메일을 Kafka, Lambda 및 SES 비동기 구조와 고객사별 DKIM 인증으로 재구축한 작업">
+<meta property="og:type" content="website">
+<meta property="og:title" content="채용 플랫폼 메일 발송 아키텍처 재구축 | 김형준">
+<meta property="og:description" content="대량 발송이 지연되던 채용 메일을 Kafka, Lambda 및 SES 비동기 구조와 고객사별 DKIM 인증으로 재구축한 작업">
+<meta property="og:url" content="https://khj1008.github.io/projects/recruit-mail-delivery-architecture/">
+<link rel="canonical" href="https://khj1008.github.io/projects/recruit-mail-delivery-architecture/">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<main class="page narrow">
+<nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
+<article>
+<h1 class="post-title">채용 플랫폼 메일 발송 아키텍처 재구축</h1>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">SES</span><span class="tag">Kafka</span><span class="tag">Lambda</span></dd><dt>분야</dt><dd><span class="tag">인프라 설계</span></dd><dt>한 줄 요약</dt><dd>대량 발송이 지연되던 채용 메일을 Kafka, Lambda 및 SES 비동기 구조와 고객사별 DKIM 인증으로 재구축한 작업</dd><dt>핵심 역량</dt><dd><span class="tag">트래픽 대응</span></dd></dl>
+<div class="content">
+<h2 id="왜-이-작업이-필요했나">왜 이 작업이 필요했나?</h2>
+<p>저희 채용 플랫폼은 AI 역량검사 결과 제출 안내처럼 고객사(기업) 명의의 메일을 지원자에게 대량으로 발송합니다. 기존에는 타사 메일러가 고정 IP(Elastic IP) 하나와 단일 SMTP 설정으로 이 메일을 발송하고 있었는데, 국내외 주요 메일 서비스가 수신 정책을 강화하면서 대규모 발송 장애가 발생했습니다.</p>
+<p>증상은 여러 곳에서 동시에 나타났습니다. 네이버는 발송 IP의 동시 접속 수가 기준을 초과한다는 이유로 메일을 거부했고, 같은 동시 접속 제한 때문에 대규모 발송이 1시간 이상 지연되기도 했습니다. Gmail에서는 스팸으로 분류됐는데, 원인은 DMARC 기준을 충족하지 못했기 때문이었습니다. 고객사 도메인 명의로 발신하면서도 해당 도메인으로 발송해도 된다는 것을 인증할 방법이 없었던 것입니다. 고정 IP 하나에 발송이 집중되다 보니 평판이 지속적으로 하락해 스팸 지수 관리도 어려웠고, 메일이 어디서 왜 실패했는지 파악하기 어렵다는 운영상의 한계도 있었습니다.</p>
+<p>그래서 IP 평판과 도메인 인증으로 발신 신뢰도를 회복하는 것뿐 아니라, 집중되는 요청을 흡수하고 메일 한 건 단위로 결과를 추적할 수 있는 구조까지 함께 개선해야 했습니다.</p>
+<p>당시 저는 채용 플랫폼의 메일 및 SMS 발송을 주로 담당한 DevOps 엔지니어였고, 새 발송 아키텍처의 설계와 구축을 담당했습니다. 발송 요청 발행, 결과 소비, 조회 API 호출, 고객사 도메인 등록 화면은 개발팀이 구현하고, 발송과 이벤트 수집, 이력 저장, 조회 API는 제가 담당하는 방식으로 범위를 분리했습니다. 그 사이를 연결하는 요청 및 결과 메시지 스키마, 이벤트 타입, 조회 API 응답 형식은 제가 문서로 정의해 개발팀에 전달했습니다. 미인증 도메인으로는 발송이 불가하고 DNS 전파에 시간이 소요된다는 SES의 인증 구조와 제약도 개발팀에 설명해서 요구사항에 반영되도록 했습니다.</p>
+<h2 id="어떻게-해결했나">어떻게 해결했나</h2>
+<p>발송 주체는 고정 IP 메일러에서 Amazon SES로 전환했습니다. 애플리케이션이 SES를 직접 호출하지 않고 Kafka 토픽에 요청 메시지를 발행하면, Lambda가 그 메시지를 소비해 SES로 전송하는 구조입니다. 결과는 결과 토픽으로 푸시하고, 누락된 결과나 개별 이력은 조회 API로 직접 확인할 수 있도록 두 경로를 제공했습니다. 이력은 DynamoDB에 메일 ID 단위로 저장하고 TTL로 주기적으로 삭제합니다.</p>
+<p>선택마다 얻은 것과 감수한 것이 분명했는데, 정리하면 다음과 같습니다.</p>
+<table>
+<thead>
+<tr>
+<th>선택</th>
+<th>얻은 것</th>
+<th>감수한 것</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SES로 발송</td>
+<td>IP 평판 관리를 관리형 서비스에 위임하고, 도메인별 DKIM을 API로 제어할 수 있습니다.</td>
+<td>계정 발송 한도 내에서만 전송할 수 있고, 미인증이나 한도 초과로 호출이 실패하는 경우를 별도로 처리해야 합니다.</td>
+</tr>
+<tr>
+<td>Kafka 토픽과 Lambda 소비</td>
+<td>요청이 집중돼도 서비스는 메시지만 발행하고 처리를 마치면 됩니다.</td>
+<td>결과가 비동기라 반환할 경로가 필요하고, 재처리로 인해 중복 방지도 필요합니다.</td>
+</tr>
+<tr>
+<td>결과 토픽과 조회 API</td>
+<td>평상시에는 이벤트로 갱신하고, 누락된 결과나 개별 이력은 API로 확인합니다.</td>
+<td>두 경로의 스키마를 하나로 통일해야 합니다.</td>
+</tr>
+<tr>
+<td>DynamoDB에 메일 ID 단위로 저장, TTL 삭제</td>
+<td>중복 확인과 메일 1건 조회라는 주 접근 패턴에 적합하고, 오래된 이력이 자동으로 정리됩니다.</td>
+<td>고객사별 통계 같은 조건 검색이나 집계에는 적합하지 않습니다.</td>
+</tr>
+</tbody>
+</table>
+<p>전체 흐름은 아래와 같습니다. 파란 점선 영역이 개발팀이 구현한 부분입니다.</p>
+<figure><img src="/assets/img/mail-architecture/01.png" alt="메일 발송 아키텍처. 파란 점선 안이 개발팀이 구현한 부분" loading="lazy"><figcaption>메일 발송 아키텍처. 파란 점선 안이 개발팀이 구현한 부분</figcaption></figure>
+<h2 id="까다로웠던-부분">까다로웠던 부분</h2>
+<h3 id="고객사-도메인-인증을-제품-흐름-안으로">고객사 도메인 인증을 제품 흐름 안으로</h3>
+<p>Gmail의 DMARC 검사는 <b>From 주소의 도메인과 DKIM 서명 도메인이 일치해야</b> 통과합니다. 고객사 명의로 메일을 발송하려면 고객사 도메인마다 DKIM 인증이 별도로 필요하다는 의미입니다. SES는 발신 도메인을 Identity라는 단위로 관리하는데, 이 과정을 콘솔에서 수동으로 처리하지 않고 SES v2 Java SDK로 구현하도록 했습니다.</p>
+<p>흐름은 다음과 같습니다. Identity를 생성하면 처음에는 Unverified 상태이고, 이 상태의 도메인을 발신자로 사용하면 메일이 발송되지 않습니다. DKIM 값을 발급하면 CNAME 레코드 3개가 생성되는데, 이를 플랫폼 화면에 표시하고 고객사가 자사 DNS에 직접 등록합니다. 레코드가 일치하면 상태가 Successful로 변경되지만, DNS 전파로 인해 등록 즉시 변경되지 않고 수 분이 소요될 수 있어서 상태를 다시 확인하는 흐름을 전제로 했습니다. 그 결과 고객사가 증가해도 운영자가 콘솔에서 도메인을 등록할 일이 없고, 인증은 고객사의 DNS 작업만으로 완료됩니다.</p>
+<figure><img src="/assets/img/mail-architecture/02.png" alt="SES 콘솔의 DKIM 화면. 발급된 CNAME 3개가 DNS에 등록되면 상태가 Successful로 변경됨" loading="lazy"><figcaption>SES 콘솔의 DKIM 화면. 발급된 CNAME 3개가 DNS에 등록되면 상태가 Successful로 변경됨</figcaption></figure>
+<h3 id="중복-발송-방지-그리고-ses까지-전달되지-않은-실패">중복 발송 방지, 그리고 SES까지 전달되지 않은 실패</h3>
+<p>요청 메시지는 메일 ID(EmailId)와 고객사 식별자, 명령 타입, 그리고 실제 발송 내용을 담은 Payload로 구성했습니다. Payload는 SES v2 <code>SendEmail</code> 요청과 필드 구조가 동일해서, 개발팀은 SES API 문서를 그대로 참고해 메시지를 작성할 수 있습니다.</p>
+<p>Kafka는 재시도나 재처리 과정에서 동일한 메시지를 재전달할 수 있습니다. 그래서 발송 Lambda는 메시지를 수신하면 동일한 EmailId의 이력이 DynamoDB에 있는지 먼저 확인하고, 이력이 있으면 발송하지 않습니다. 지원자가 동일한 안내 메일을 중복 수신하는 일은 이렇게 방지했습니다.</p>
+<p>까다로웠던 것은 SES까지 전달되지도 않은 실패였습니다. SES 이벤트는 SES가 요청을 수락한 이후의 상황만 통보합니다. 미인증 도메인으로 전송하거나 발송 한도를 초과해 호출 자체가 실패하면 이벤트가 아예 발생하지 않습니다. 이 경우를 <code>SendMailFailure</code>라는 커스텀 타입으로 기록해서 SES 이벤트와 동일한 EventType 체계에 포함했고, 덕분에 개발팀은 이벤트가 끝내 수신되지 않는 메일을 별도로 추적하지 않아도 됩니다.</p>
+<h3 id="메일-한-건의-결과를-하나의-스키마로">메일 한 건의 결과를 하나의 스키마로</h3>
+<p>이벤트 수신 Lambda는 SES가 SNS로 전송하는 이벤트(Send, Reject, Delivery, Bounce, Complaint, DeliveryDelay, Subscription, Open, Click)를 공통 필드로 정리합니다. 요청에서 전달받은 메일 ID와 고객사 식별자, SES가 반환한 MessageId에 이벤트 타입과 SES 원본 상세(바운스 유형이나 SMTP 진단 코드 등)을 추가하고, DynamoDB TTL로 이력을 삭제하기 위한 만료 값도 함께 포함했습니다.</p>
+<p>시각은 두 개로 분리해 기록했습니다. SNS에서 이벤트가 발생한 시각(PublishedAt)과 이벤트 수신 Lambda가 트리거된 시각(ConsumedAt)을 별도로 기록하면, 결과 반영이 지연될 때 SES 측의 지연인지 파이프라인 측의 지연인지 구분할 수 있습니다.</p>
+<p>결과 토픽 메시지와 조회 API 응답은 동일한 필드를 사용합니다. 조회 API는 메일 ID 하나에 대한 모든 이벤트를 PublishedAt 내림차순으로 반환하고, 환경마다 동일한 경로로 제공했습니다. 개발팀 입장에서는 스키마 하나만 파악하면 push와 pull을 모두 처리할 수 있는 셈입니다.</p>
+<h2 id="결과">결과</h2>
+<p>대량 발송도 차단이나 지연 없이 수 분 이내에 완료되도록 개선됐습니다. 이전에는 1시간 이상 소요되던 발송입니다. IP 평판 관리를 SES에 위임하고 고객사 도메인마다 DKIM을 적용하면서 네이버의 동시 접속 제한과 Gmail의 DMARC 기준에 대응할 수 있었고, Elastic IP 하나에 종속돼 있던 스팸 지수 관리 부담도 해소됐습니다.</p>
+<p>운영 측면에서도 개선된 점이 있습니다. 개발팀과 운영팀이 메일 한 건의 발송, 배달, 바운스, 실패 사유를 조회 API로 즉시 확인할 수 있게 됐고, 고객사가 증가해도 도메인 인증은 제품 화면과 고객사의 DNS 작업만으로 완료됩니다.</p>
+<h2 id="돌아보며">돌아보며</h2>
+<p>메일 전달성은 인프라만 잘 구축한다고 해결되는 문제가 아니었습니다. 도메인 인증은 결국 고객사가 자사 DNS에 레코드를 등록해야 완료되기 때문에, CNAME 값을 어떻게 안내할지와 전파 지연 동안 상태를 어떻게 확인할지까지 설계 범위에 포함해야 했습니다. 비동기로 전환한 대가는 결과를 반환하는 부분에서 치렀는데, 요청을 큐에 적재하는 순간 결과 경로와 중복 처리, SES까지 전달되지 않은 실패를 어떻게 표현할지를 함께 결정해야 했습니다.</p>
+<p><b>기술 스택</b>: Amazon SES, Kafka, AWS Lambda</p>
+
+</div>
+</article>
+<footer class="footer">© 김형준 | <a href="mailto:kimhyju703@naver.com">kimhyju703@naver.com</a></footer>
+</main>
+</body>
+</html>

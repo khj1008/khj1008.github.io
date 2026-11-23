@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AWS DMS를 활용한 계정 간 RDS 실시간 마이그레이션 및 동기화 | 김형준</title>
+<meta name="description" content="RDS 스냅샷과 AWS DMS CDC를 조합해 AWS 계정 간 MariaDB를 실시간 동기화하며 마이그레이션. binlog retention 초과로 발생한 이벤트 누락 원인과 대응을 정리">
+<meta property="og:type" content="website">
+<meta property="og:title" content="AWS DMS를 활용한 계정 간 RDS 실시간 마이그레이션 및 동기화 | 김형준">
+<meta property="og:description" content="RDS 스냅샷과 AWS DMS CDC를 조합해 AWS 계정 간 MariaDB를 실시간 동기화하며 마이그레이션. binlog retention 초과로 발생한 이벤트 누락 원인과 대응을 정리">
+<meta property="og:url" content="https://khj1008.github.io/projects/dms-cross-account-rds/">
+<link rel="canonical" href="https://khj1008.github.io/projects/dms-cross-account-rds/">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<main class="page narrow">
+<nav class="crumb"><a href="/">← 김형준 | DevOps Engineer</a></nav>
+<article>
+<h1 class="post-title">AWS DMS를 활용한 계정 간 RDS 실시간 마이그레이션 및 동기화</h1>
+<dl class="props"><dt>기술 스택</dt><dd><span class="tag">AWS DMS</span><span class="tag">RDS</span><span class="tag">MariaDB</span></dd><dt>분야</dt><dd><span class="tag">문제 해결</span></dd><dt>한 줄 요약</dt><dd>RDS 스냅샷과 AWS DMS CDC를 조합해 AWS 계정 간 MariaDB를 실시간 동기화하며 마이그레이션. binlog retention 초과로 발생한 이벤트 누락 원인과 대응을 정리</dd><dt>핵심 역량</dt><dd><span class="tag">클라우드 인프라</span></dd></dl>
+<div class="content">
+<h2 id="aws-dms를-활용한-계정-간-rds-마이그레이션-실전-가이드">AWS DMS를 활용한 계정 간 RDS 마이그레이션 실전 가이드</h2>
+<p>최근 AWS 계정 간 RDS MariaDB 마이그레이션 작업을 진행했습니다. 스냅샷 복제와 DMS CDC를 조합한 방식으로 진행했는데, 예상보다 고려해야 할 부분이 많았습니다. 이 글에서는 실제 작업 과정과 함께 간과하기 쉬운 주의사항들을 공유하려고 합니다.</p>
+<figure><img src="https://cdn-images-1.medium.com/max/1024/1*5XHKkJhEW0S6w94TfrhK7Q.png" alt="" loading="lazy"></figure>
+<p>source DB와 target DB, 그리고 마이그레이션을 위한 dms의 provisioned 위치를 나타내는 간략한 아키텍처입니다.</p>
+<h2 id="마이그레이션-전략-선택하기">마이그레이션 전략 선택하기</h2>
+<p>AWS DMS를 사용한 마이그레이션에는 크게 두 가지 방식이 있습니다.</p>
+<p><b>Full Load + CDC 방식</b>은 DMS가 처음부터 끝까지 모든 데이터를 복제하고, 복제 중 발생하는 변경사항도 함께 처리합니다. 가장 안전하고 간단하지만, 데이터 크기가 크면 시간이 오래 소요됩니다.</p>
+<p><b>스냅샷 + CDC Only 방식</b>은 먼저 RDS 스냅샷으로 데이터를 빠르게 복사하고, DMS는 그 이후의 변경사항만 처리합니다. 시간과 네트워크 대역폭을 절약할 수 있지만, binlog position 관리가 필요합니다.</p>
+<p>저는 데이터 크기가 크지 않았지만 Full Load 시간을 단축하기 위해 스냅샷 방식을 선택했습니다. 이 방식을 선택한다면 binlog position 타이밍이 매우 중요합니다. 이 부분은 뒤에서 자세히 다루겠습니다.</p>
+<h2 id="소스-db-준비하기">소스 DB 준비하기</h2>
+<p>마이그레이션을 시작하기 전에 소스 RDS를 먼저 준비해야 합니다.</p>
+<h3 id="dms-전용-사용자-생성">DMS 전용 사용자 생성</h3>
+<p>DMS가 소스 DB에 접근할 수 있도록 전용 사용자를 생성합니다. 보안을 위해 필요한 최소 권한만 부여하는 것이 좋습니다.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">CREATE</span> <span class="pl-k">USER</span> '<span class="pl-en">dms_user</span>'@<span class="pl-s"><span class="pl-pds">'</span>%<span class="pl-pds">'</span></span> IDENTIFIED BY <span class="pl-s"><span class="pl-pds">'</span>your_secure_password<span class="pl-pds">'</span></span>;</pre></div>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">GRANT</span> <span class="pl-k">SELECT</span>, RELOAD, LOCK TABLES, REPLICATION SLAVE, 
+      BINLOG MONITOR, SHOW VIEW <span class="pl-k">ON</span> <span class="pl-k">*</span>.<span class="pl-k">*</span> TO <span class="pl-s"><span class="pl-pds">'</span>dms_user<span class="pl-pds">'</span></span>@<span class="pl-s"><span class="pl-pds">'</span>%<span class="pl-pds">'</span></span>;</pre></div>
+<p>MariaDB 10.5.2 이상을 사용한다면 BINLOG MONITOR 권한이 필요합니다. 이전 버전에서는 REPLICATION CLIENT를 사용하면 됩니다.</p>
+<h3 id="binlog-설정">Binlog 설정</h3>
+<p>DMS가 변경사항을 추적하려면 binlog가 활성화되어 있어야 합니다. RDS 파라미터 그룹에서 다음 값들을 설정합니다:</p>
+<ul>
+<li>binlog_format = ROW - DMS는 Row-based 복제만 지원합니다</li>
+<li>binlog_row_image = FULL - 전체 행 정보를 기록해야 합니다</li>
+<li>binlog_checksum = NONE - DMS 호환성을 위해 체크섬을 비활성화합니다</li>
+</ul>
+<p>또한 RDS 콘솔에서 자동 백업을 활성화해야 binlog가 생성됩니다. 백업 보존 기간은 1일 이상으로 설정하면 됩니다.</p>
+<h3 id="binlog-retention-설정">Binlog Retention 설정</h3>
+<p>이 부분이 특히 중요합니다. Binlog retention 기간은 스냅샷 생성부터 DMS Task 시작까지의 시간을 충분히 포괄해야 합니다.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-c"><span class="pl-c">--</span> 24시간 보존 설정</span>
+CALL <span class="pl-c1">mysql</span>.<span class="pl-c1">rds_set_configuration</span>(<span class="pl-s"><span class="pl-pds">'</span>binlog retention hours<span class="pl-pds">'</span></span>, <span class="pl-c1">24</span>);</pre></div>
+<div class="highlight highlight-source-sql"><pre><span class="pl-c"><span class="pl-c">--</span> 현재 설정 확인</span>
+CALL <span class="pl-c1">mysql</span>.<span class="pl-c1">rds_show_configuration</span>;</pre></div>
+<p>저는 처음에 24시간으로 설정했는데, 스냅샷 생성과 복원에 예상보다 시간이 소요되어 binlog 파일이 삭제되는 상황이 발생했습니다. 여유 있게 48시간 이상으로 설정하는 것을 권장합니다.</p>
+<h2 id="스냅샷-생성과-binlog-position-기록">스냅샷 생성과 Binlog Position 기록</h2>
+<p>이 단계가 이 방식의 핵심이자 가장 주의해야 할 부분입니다.</p>
+<h3 id="binlog-position-기록">Binlog Position 기록</h3>
+<p><b>이 단계에서 실수하면 데이터 정합성 문제가 발생할 수 있습니다.</b></p>
+<p>스냅샷 생성 전에 binlog position을 확인해야 합니다. 스냅샷 생성 후나 생성 중에 확인하면 안 됩니다.</p>
+<div class="highlight highlight-source-sql"><pre>SHOW MASTER STATUS;</pre></div>
+<p>출력 결과는 다음과 같은 형태입니다:</p>
+<div class="highlight highlight-text-adblock"><pre>+---------------------------+----------+--------------+------------------+
+<span class="pl-k">|</span> File                      | Position | Binlog_Do_DB | Binlog_Ignore_DB <span class="pl-k">|</span>
++---------------------------+----------+--------------+------------------+
+<span class="pl-k">|</span> mysql-bin-changelog.171045|      393 |              |                  <span class="pl-k">|</span>
++---------------------------+----------+--------------+------------------+</pre></div>
+<p>File과 Position 값을 정확히 기록해두세요. 이후 DMS Task를 생성할 때 사용합니다.</p>
+<blockquote>
+<p><b>왜 스냅샷 생성 전에 position을 기록해야 할까요?</b></p>
+</blockquote>
+<p>DMS는 지정한 binlog position <b>이후</b>의 변경사항만 복제합니다. 따라서:</p>
+<p><b>스냅샷 생성 전에 position 기록 (올바른 방법):</b></p>
+<ul>
+<li>Position 기록: 10:00 (File: 171045, Position: 393)</li>
+<li>스냅샷 생성 중 변경사항 발생: 10:00~11:00</li>
+<li>스냅샷 완료: 11:00 (10:00~11:00 사이 변경사항 포함)</li>
+<li>CDC 시작: 10:00 이후부터 복제</li>
+<li>결과: 10:00~11:00 사이 변경사항이 <b>중복 복제</b>되지만, DMS가 멱등성으로 처리하므로 안전 ✓</li>
+</ul>
+<p><b>스냅샷 완료 후에 position 기록 (잘못된 방법):</b></p>
+<ul>
+<li>스냅샷 생성 중 변경사항 발생: 10:00~11:00</li>
+<li>스냅샷 완료: 11:00</li>
+<li>Position 기록: 11:05 (File: 171564, Position: 2316)</li>
+<li>CDC 시작: 11:05 이후부터 복제</li>
+<li>결과: 11:00~11:05 사이 변경사항 <b>누락</b> ❌</li>
+</ul>
+<p><b>실제 발생한 문제:</b></p>
+<ul>
+<li>스냅샷 생성 전 position 기록: 171045:393</li>
+<li>스냅샷 생성 중 DELETE 발생</li>
+<li>DMS Task 시작 시점에 171045 파일이 이미 삭제됨 (binlog retention 초과)</li>
+<li>DMS가 가장 오래된 파일 171564:2316부터 시작</li>
+<li>171045~171564 사이의 DELETE 이벤트 손실</li>
+<li>결과: 타겟에만 데이터가 남음</li>
+</ul>
+<p><b>핵심:</b> 스냅샷 생성 <b>전</b>에 position을 기록하되, <b>binlog retention을 충분히 길게</b> 설정해야 합니다. 그래야 DMS Task 시작 시점에도 해당 binlog 파일이 보존됩니다.</p>
+<h3 id="스냅샷-생성">스냅샷 생성</h3>
+<p>먼저 RDS 스냅샷을 생성합니다. 콘솔에서 간단히 생성할 수 있지만, CLI를 사용하면 자동화에 유리합니다.</p>
+<div class="highlight highlight-source-shell"><pre>aws rds create-db-snapshot \
+  --db-instance-identifier source-db \
+  --db-snapshot-identifier migration-snapshot-20260223 \
+  --region ap-northeast-2</pre></div>
+<p>스냅샷 생성은 DB 크기에 따라 수십 분에서 수 시간까지 소요될 수 있습니다.</p>
+<h3 id="스냅샷-공유--kms-암호화-처리">스냅샷 공유 — KMS 암호화 처리</h3>
+<p>이 단계는 많은 분들이 간과하는 부분입니다. RDS 스냅샷의 KMS 암호화 방식에 따라 절차가 완전히 달라집니다.</p>
+<h3 id="현재-암호화-방식-확인">현재 암호화 방식 확인</h3>
+<p>먼저 스냅샷이 어떤 KMS 키로 암호화되어 있는지 확인합니다:</p>
+<div class="highlight highlight-source-shell"><pre>aws rds describe-db-snapshots \
+  --db-snapshot-identifier migration-snapshot-20260223 \
+  --query <span class="pl-s"><span class="pl-pds">'</span>DBSnapshots[0].{KmsKeyId:KmsKeyId,Encrypted:Encrypted}<span class="pl-pds">'</span></span></pre></div>
+<p>출력 예시:</p>
+<div class="highlight highlight-source-json"><pre>{
+  <span class="pl-ent">"KmsKeyId"</span>: <span class="pl-s"><span class="pl-pds">"</span>arn:aws:kms:ap-northeast-2:987654321098:key/aws/rds<span class="pl-pds">"</span></span>,
+  <span class="pl-ent">"Encrypted"</span>: <span class="pl-c1">true</span>
+}</pre></div>
+<p>key/aws/rds가 포함되어 있으면 AWS 관리형 기본 키(default KMS)입니다.</p>
+<h3 id="case-1-커스텀-kms로-암호화된-경우">Case 1: 커스텀 KMS로 암호화된 경우</h3>
+<p>커스텀 KMS 키로 암호화되어 있다면 즉시 공유할 수 있습니다.</p>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> A 계정에서 B 계정으로 공유</span>
+aws rds modify-db-snapshot-attribute \
+  --db-snapshot-identifier migration-snapshot-20260223 \
+  --attribute-name restore \
+  --values-to-add 123456789012</pre></div>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> B 계정에서 복사</span>
+aws rds copy-db-snapshot \
+  --source-db-snapshot-identifier arn:aws:rds:ap-northeast-2:987654321098:snapshot:migration-snapshot-20260223 \
+  --target-db-snapshot-identifier migration-snapshot-copy</pre></div>
+<h3 id="case-2-default-kms로-암호화된-경우-대부분">Case 2: Default KMS로 암호화된 경우 (대부분)</h3>
+<p>대부분의 RDS는 기본적으로 AWS 관리형 KMS 키로 암호화되어 있습니다. 이 경우 <b>직접 공유가 불가능</b>하므로 다음 단계를 거쳐야 합니다.</p>
+<p><b>1단계: A 계정에서 공유 가능한 KMS 키 생성</b></p>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> KMS 키 생성</span>
+aws kms create-key \
+  --description <span class="pl-s"><span class="pl-pds">"</span>RDS snapshot sharing key<span class="pl-pds">"</span></span> \
+  --region ap-northeast-2</pre></div>
+<div class="highlight highlight-text-adblock"><pre><span class="pl-c"># 출력에서 KeyId 확인 (예: 12345678-1234-1234-1234-123456789012)</span></pre></div>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> B 계정에 KMS 키 사용 권한 부여</span>
+aws kms create-grant \
+  --key-id 12345678-1234-1234-1234-123456789012 \
+  --grantee-principal arn:aws:iam::123456789012:root \
+  --operations Decrypt CreateGrant</pre></div>
+<p><b>2단계: A 계정에서 공유 가능한 KMS로 스냅샷 복사</b></p>
+<div class="highlight highlight-source-shell"><pre>aws rds copy-db-snapshot \
+  --source-db-snapshot-identifier migration-snapshot-20260223 \
+  --target-db-snapshot-identifier migration-snapshot-shared-kms \
+  --kms-key-id arn:aws:kms:ap-northeast-2:987654321098:key/12345678-1234-1234-1234-123456789012</pre></div>
+<p>이 작업은 데이터 크기에 따라 수십 분에서 수 시간이 소요됩니다. 완료될 때까지 대기해야 합니다.</p>
+<p><b>3단계: 공유 가능한 KMS로 암호화된 스냅샷을 B 계정에 공유</b></p>
+<div class="highlight highlight-source-shell"><pre>aws rds modify-db-snapshot-attribute \
+  --db-snapshot-identifier migration-snapshot-shared-kms \
+  --attribute-name restore \
+  --values-to-add 123456789012</pre></div>
+<p><b>4단계: B 계정에서 자신의 KMS로 스냅샷 복사</b></p>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> B 계정에서 실행</span>
+aws rds copy-db-snapshot \
+  --source-db-snapshot-identifier arn:aws:rds:ap-northeast-2:987654321098:snapshot:migration-snapshot-shared-kms \
+  --target-db-snapshot-identifier migration-snapshot-copy \
+  --kms-key-id alias/aws/rds</pre></div>
+<p>alias/aws/rds는 AWS 관리형 기본 키를 의미합니다. 커스텀 KMS를 사용하려면 해당 키의 ARN을 지정하면 됩니다.</p>
+<p><b>주의사항:</b></p>
+<ul>
+<li>Default KMS 스냅샷은 직접 공유 불가</li>
+<li>각 복사 단계마다 완료 확인 필수</li>
+<li>KMS 권한 설정 오류 시 B 계정에서 복사 실패</li>
+</ul>
+<h2 id="타겟-db-복원-및-권한-설정">타겟 DB 복원 및 권한 설정</h2>
+<p>B 계정에서 스냅샷으로 RDS를 복원합니다.</p>
+<div class="highlight highlight-source-shell"><pre>aws rds restore-db-instance-from-db-snapshot \
+  --db-instance-identifier target-db \
+  --db-snapshot-identifier migration-snapshot-copy \
+  --db-instance-class db.r5.large \
+  --vpc-security-group-ids sg-xxxxx \
+  --db-subnet-group-name target-subnet-group \
+  --region ap-northeast-2</pre></div>
+<p>복원이 완료되면 파라미터 그룹과 보안 그룹을 확인하고, 필요하면 수정합니다.</p>
+<h3 id="타겟-db-권한-설정">타겟 DB 권한 설정</h3>
+<p>스냅샷으로 복원한 DB에는 소스 DB의 사용자 정보가 그대로 복사됩니다. 하지만 DMS가 타겟 DB에 데이터를 기록하려면 적절한 권한이 필요합니다.</p>
+<p>DMS Task에서 사용할 타겟 DB 사용자에게 다음 권한을 부여해야 합니다:</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-c"><span class="pl-c">--</span> DMS 전용 사용자 생성 (또는 기존 admin 사용자 사용)</span>
+<span class="pl-k">CREATE</span> <span class="pl-k">USER</span> '<span class="pl-en">dms_target_user</span>'@<span class="pl-s"><span class="pl-pds">'</span>%<span class="pl-pds">'</span></span> IDENTIFIED BY <span class="pl-s"><span class="pl-pds">'</span>secure_password<span class="pl-pds">'</span></span>;</pre></div>
+<div class="highlight highlight-source-sql"><pre><span class="pl-c"><span class="pl-c">--</span> 필요한 권한 부여</span>
+<span class="pl-k">GRANT</span> <span class="pl-k">SELECT</span>, INSERT, <span class="pl-k">UPDATE</span>, <span class="pl-k">DELETE</span>, CREATE, DROP, INDEX, ALTER, 
+      CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, 
+      SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, TRIGGER, <span class="pl-k">REFERENCES</span> 
+      <span class="pl-k">ON</span> <span class="pl-k">*</span>.<span class="pl-k">*</span> TO <span class="pl-s"><span class="pl-pds">'</span>dms_target_user<span class="pl-pds">'</span></span>@<span class="pl-s"><span class="pl-pds">'</span>%<span class="pl-pds">'</span></span>;</pre></div>
+<div class="highlight highlight-source-sql"><pre>FLUSH PRIVILEGES;</pre></div>
+<p>만약 기존 admin 사용자를 사용한다면 이미 충분한 권한이 있을 것입니다. 하지만 보안을 위해 DMS 전용 사용자를 생성하는 것을 권장합니다.</p>
+<p><b>주의:</b> 타겟 DB에 쓰기 권한이 없으면 DMS Task 실행 도중 에러가 발생합니다. Task 시작 전에 권한을 반드시 확인하세요.</p>
+<h2 id="네트워크-연결-구성">네트워크 연결 구성</h2>
+<p>A 계정과 B 계정의 VPC를 연결해야 DMS가 양쪽 DB에 접근할 수 있습니다.</p>
+<h3 id="vpc-peering-설정">VPC Peering 설정</h3>
+<p>VPC Peering은 두 VPC를 직접 연결하는 가장 간단한 방법입니다.</p>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> A 계정에서 Peering 요청</span>
+aws ec2 create-vpc-peering-connection \
+  --vpc-id vpc-aaaaa \
+  --peer-vpc-id vpc-bbbbb \
+  --peer-owner-id 123456789012 \
+  --peer-region ap-northeast-2</pre></div>
+<div class="highlight highlight-source-shell"><pre><span class="pl-c"><span class="pl-c">#</span> B 계정에서 수락</span>
+aws ec2 accept-vpc-peering-connection \
+  --vpc-peering-connection-id pcx-xxxxx</pre></div>
+<p>Peering 연결을 생성한 후에는 각 VPC의 라우팅 테이블에 상대방 CIDR 대역으로 향하는 경로를 추가해야 합니다. 이 부분을 누락하면 연결되지 않으므로 주의하세요.</p>
+<h3 id="보안-그룹-설정">보안 그룹 설정</h3>
+<p>소스 RDS와 타겟 RDS의 보안 그룹에서 DMS Replication Instance의 보안 그룹으로부터 3306 포트 접근을 허용해야 합니다.</p>
+<div class="highlight highlight-text-adblock"><pre>Type: MySQL/Aurora
+Port: 3306
+Source: DMS Replication Instance 보안 그룹 (sg-xxxxx)</pre></div>
+<h2 id="dms-설정하기">DMS 설정하기</h2>
+<p>이제 본격적으로 DMS를 설정할 차례입니다.</p>
+<h3 id="replication-instance-생성">Replication Instance 생성</h3>
+<p><b>중요한 점:</b> DMS Serverless는 custom CDC start position을 지원하지 않습니다. 스냅샷 방식을 사용하려면 반드시 Provisioned Instance를 사용해야 합니다.</p>
+<div class="highlight highlight-source-shell"><pre>aws dms create-replication-instance \
+  --replication-instance-identifier migration-replication-instance \
+  --replication-instance-class dms.t3.medium \
+  --allocated-storage 50 \
+  --vpc-security-group-ids sg-xxxxx \
+  --replication-subnet-group-identifier dms-subnet-group</pre></div>
+<p>인스턴스 크기는 DB 크기와 변경 속도에 따라 선택합니다. 소규모 DB라면 dms.t3.medium으로 충분하고, 대용량이거나 변경이 빈번하다면 dms.c5.xlarge 이상을 고려하세요.</p>
+<h3 id="endpoint-생성">Endpoint 생성</h3>
+<p>Source와 Target Endpoint를 각각 생성해야 합니다.</p>
+<p><b>Source Endpoint:</b></p>
+<div class="highlight highlight-source-shell"><pre>aws dms create-endpoint \
+  --endpoint-identifier source-mariadb \
+  --endpoint-type <span class="pl-c1">source</span> \
+  --engine-name mariadb \
+  --server-name source-db.xxxxx.ap-northeast-2.rds.amazonaws.com \
+  --port 3306 \
+  --username dms_user \
+  --password your_secure_password</pre></div>
+<p><b>Target Endpoint:</b></p>
+<div class="highlight highlight-source-shell"><pre>aws dms create-endpoint \
+  --endpoint-identifier target-mariadb \
+  --endpoint-type target \
+  --engine-name mariadb \
+  --server-name target-db.xxxxx.ap-northeast-2.rds.amazonaws.com \
+  --port 3306 \
+  --username dms_target_user \
+  --password target_password</pre></div>
+<p>Endpoint를 생성한 후에는 반드시 연결 테스트를 수행하세요.</p>
+<div class="highlight highlight-source-shell"><pre>aws dms test-connection \
+  --replication-instance-arn arn:aws:dms:... \
+  --endpoint-arn arn:aws:dms:...</pre></div>
+<p>연결 테스트가 실패하면 보안 그룹이나 네트워크 설정을 다시 확인해야 합니다.</p>
+<h3 id="replication-task-생성">Replication Task 생성</h3>
+<p>Task를 생성할 때 가장 중요한 설정은 CDC start position입니다. 앞서 기록해둔 binlog position을 여기에 입력합니다.</p>
+<p>먼저 Table Mappings JSON 파일을 작성합니다. 이 파일은 어떤 테이블을 복제할지 정의합니다.</p>
+<p><b>table-mappings.json:</b></p>
+<div class="highlight highlight-source-json"><pre>{
+  <span class="pl-ent">"rules"</span>: [
+    {
+      <span class="pl-ent">"rule-type"</span>: <span class="pl-s"><span class="pl-pds">"</span>selection<span class="pl-pds">"</span></span>,
+      <span class="pl-ent">"rule-id"</span>: <span class="pl-s"><span class="pl-pds">"</span>1<span class="pl-pds">"</span></span>,
+      <span class="pl-ent">"rule-name"</span>: <span class="pl-s"><span class="pl-pds">"</span>include-all-tables<span class="pl-pds">"</span></span>,
+      <span class="pl-ent">"object-locator"</span>: {
+        <span class="pl-ent">"schema-name"</span>: <span class="pl-s"><span class="pl-pds">"</span>%<span class="pl-pds">"</span></span>,
+        <span class="pl-ent">"table-name"</span>: <span class="pl-s"><span class="pl-pds">"</span>%<span class="pl-pds">"</span></span>
+      },
+      <span class="pl-ent">"rule-action"</span>: <span class="pl-s"><span class="pl-pds">"</span>include<span class="pl-pds">"</span></span>
+    }
+  ]
+}</pre></div>
+<p>다음으로 Task Settings JSON 파일을 작성합니다. 여기서 중요한 설정은 TargetTablePrepMode를 DO_NOTHING으로 지정하는 것입니다. 스냅샷으로 테이블이 이미 존재하기 때문입니다.</p>
+<p><b>task-settings.json:</b></p>
+<div class="highlight highlight-source-json"><pre>{
+  <span class="pl-ent">"TargetMetadata"</span>: {
+    <span class="pl-ent">"TargetSchema"</span>: <span class="pl-s"><span class="pl-pds">"</span><span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"SupportLobs"</span>: <span class="pl-c1">false</span>,
+    <span class="pl-ent">"FullLobMode"</span>: <span class="pl-c1">false</span>,
+    <span class="pl-ent">"LobChunkSize"</span>: <span class="pl-c1">0</span>,
+    <span class="pl-ent">"LimitedSizeLobMode"</span>: <span class="pl-c1">false</span>,
+    <span class="pl-ent">"LobMaxSize"</span>: <span class="pl-c1">0</span>,
+    <span class="pl-ent">"BatchApplyEnabled"</span>: <span class="pl-c1">false</span>
+  },
+  <span class="pl-ent">"FullLoadSettings"</span>: {
+    <span class="pl-ent">"TargetTablePrepMode"</span>: <span class="pl-s"><span class="pl-pds">"</span>DO_NOTHING<span class="pl-pds">"</span></span>
+  },
+  <span class="pl-ent">"Logging"</span>: {
+    <span class="pl-ent">"EnableLogging"</span>: <span class="pl-c1">true</span>,
+    <span class="pl-ent">"LogComponents"</span>: [
+      {
+        <span class="pl-ent">"Id"</span>: <span class="pl-s"><span class="pl-pds">"</span>SOURCE_CAPTURE<span class="pl-pds">"</span></span>,
+        <span class="pl-ent">"Severity"</span>: <span class="pl-s"><span class="pl-pds">"</span>LOGGER_SEVERITY_INFO<span class="pl-pds">"</span></span>
+      },
+      {
+        <span class="pl-ent">"Id"</span>: <span class="pl-s"><span class="pl-pds">"</span>TARGET_APPLY<span class="pl-pds">"</span></span>,
+        <span class="pl-ent">"Severity"</span>: <span class="pl-s"><span class="pl-pds">"</span>LOGGER_SEVERITY_INFO<span class="pl-pds">"</span></span>
+      }
+    ]
+  },
+  <span class="pl-ent">"ErrorBehavior"</span>: {
+    <span class="pl-ent">"DataErrorPolicy"</span>: <span class="pl-s"><span class="pl-pds">"</span>LOG_ERROR<span class="pl-pds">"</span></span>,
+    <span class="pl-ent">"RecoverableErrorCount"</span>: <span class="pl-c1">-1</span>,
+    <span class="pl-ent">"RecoverableErrorInterval"</span>: <span class="pl-c1">5</span>,
+    <span class="pl-ent">"RecoverableErrorThrottling"</span>: <span class="pl-c1">true</span>,
+    <span class="pl-ent">"RecoverableErrorThrottlingMax"</span>: <span class="pl-c1">1800</span>,
+    <span class="pl-ent">"FullLoadIgnoreConflicts"</span>: <span class="pl-c1">true</span>
+  }
+}</pre></div>
+<p>이제 Task를 생성합니다:</p>
+<div class="highlight highlight-source-shell"><pre>aws dms create-replication-task \
+  --replication-task-identifier migration-cdc-task \
+  --source-endpoint-arn arn:aws:dms:...:endpoint:source-mariadb \
+  --target-endpoint-arn arn:aws:dms:...:endpoint:target-mariadb \
+  --replication-instance-arn arn:aws:dms:...:rep:migration-replication-instance \
+  --migration-type cdc \
+  --table-mappings file://table-mappings.json \
+  --replication-task-settings file://task-settings.json \
+  --cdc-start-position <span class="pl-s"><span class="pl-pds">"</span>mysql-bin-changelog.171045:393<span class="pl-pds">"</span></span></pre></div>
+<p>--cdc-start-position에 앞서 기록한 binlog position을 정확히 입력하는 것이 핵심입니다.</p>
+<h2 id="task-실행-및-모니터링">Task 실행 및 모니터링</h2>
+<p>Task를 시작한 후에는 모니터링이 중요합니다.</p>
+<div class="highlight highlight-source-shell"><pre>aws dms start-replication-task \
+  --replication-task-arn arn:aws:dms:...:task:migration-cdc-task \
+  --start-replication-task-type start-replication</pre></div>
+<h3 id="cloudwatch로-모니터링하기">CloudWatch로 모니터링하기</h3>
+<p>DMS는 여러 유용한 메트릭을 CloudWatch로 전송합니다.</p>
+<ul>
+<li>CDCLatencySource: 소스에서 변경사항을 읽는 지연 시간</li>
+<li>CDCLatencyTarget: 타겟에 변경사항을 적용하는 지연 시간</li>
+<li>CDCIncomingChanges: 초당 수신하는 변경사항 수</li>
+</ul>
+<p>CDC Latency가 계속 증가한다면 Replication Instance 크기를 늘려야 할 수 있습니다.</p>
+<p>CloudWatch Logs에서 실시간 로그를 확인할 수도 있습니다:</p>
+<div class="highlight highlight-source-shell"><pre>aws logs tail /aws/dms/tasks/migration-cdc-task --follow</pre></div>
+<h3 id="table-statistics-확인">Table Statistics 확인</h3>
+<p>각 테이블별로 얼마나 복제되었는지 확인할 수 있습니다:</p>
+<div class="highlight highlight-source-shell"><pre>aws dms describe-table-statistics \
+  --replication-task-arn arn:aws:dms:...:task:migration-cdc-task</pre></div>
+<p>Insert, Update, Delete 건수를 보면 복제가 정상적으로 진행되고 있는지 확인할 수 있습니다.</p>
+<h2 id="데이터-정합성-검증">데이터 정합성 검증</h2>
+<p>CDC가 안정적으로 동작하고 있다면, 이제 데이터가 정확히 복제되었는지 확인해야 합니다.</p>
+<h3 id="행-수-비교">행 수 비교</h3>
+<p>가장 간단한 방법은 테이블별 행 수를 비교하는 것입니다.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-c"><span class="pl-c">--</span> 소스 DB와 타겟 DB에서 각각 실행</span>
+<span class="pl-k">SELECT</span> 
+  TABLE_SCHEMA,
+  TABLE_NAME,
+  TABLE_ROWS
+<span class="pl-k">FROM</span> <span class="pl-c1">information_schema</span>.<span class="pl-c1">TABLES</span>
+<span class="pl-k">WHERE</span> TABLE_SCHEMA NOT <span class="pl-k">IN</span> (<span class="pl-s"><span class="pl-pds">'</span>mysql<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>information_schema<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>performance_schema<span class="pl-pds">'</span></span>)
+<span class="pl-k">ORDER BY</span> TABLE_SCHEMA, TABLE_NAME;</pre></div>
+<p>결과를 비교해서 차이가 있는지 확인합니다.</p>
+<h3 id="체크섬-비교">체크섬 비교</h3>
+<p>더 정확한 검증을 위해 체크섬을 사용할 수 있습니다:</p>
+<div class="highlight highlight-source-sql"><pre>CHECKSUM TABLE <span class="pl-c1">database</span>.<span class="pl-c1">important_table1</span>, <span class="pl-c1">database</span>.<span class="pl-c1">important_table2</span>;</pre></div>
+<p>소스와 타겟에서 같은 쿼리를 실행해서 체크섬이 일치하는지 확인합니다.</p>
+<h3 id="샘플-데이터-확인">샘플 데이터 확인</h3>
+<p>최근 변경된 데이터를 직접 확인하는 것도 효과적입니다:</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">SELECT</span> <span class="pl-k">*</span> <span class="pl-k">FROM</span> important_table 
+<span class="pl-k">WHERE</span> updated_at <span class="pl-k">&gt;</span> <span class="pl-s"><span class="pl-pds">'</span>2026-02-23<span class="pl-pds">'</span></span> 
+<span class="pl-k">ORDER BY</span> updated_at <span class="pl-k">DESC</span> 
+<span class="pl-k">LIMIT</span> <span class="pl-c1">100</span>;</pre></div>
+<h2 id="애플리케이션-전환하기">애플리케이션 전환하기</h2>
+<p>데이터 검증이 완료되면 이제 애플리케이션을 전환할 차례입니다.</p>
+<h3 id="전환-전-체크리스트">전환 전 체크리스트</h3>
+<ul>
+<li>CDC Lag이 0에 가까운지 확인 (완전 동기화)</li>
+<li>주요 테이블 행 수 일치 확인</li>
+<li>타겟 DB 성능 테스트 완료</li>
+<li>롤백 계획 수립</li>
+<li>전환 시간대 결정 (트래픽이 적은 시간)</li>
+</ul>
+<h3 id="전환-절차">전환 절차</h3>
+<ol>
+<li>
+<b>애플리케이션 쓰기 중단</b> — Read-Only 모드 전환</li>
+<li>
+<b>CDC Lag = 0 대기</b> — 완전 동기화 확인</li>
+<li>
+<b>최종 검증</b> — 주요 테이블 행 수 비교</li>
+<li>
+<b>DB 엔드포인트 변경</b> — 타겟 DB로 변경</li>
+<li><b>애플리케이션 재시작</b></li>
+<li><b>정상 동작 확인</b></li>
+</ol>
+<h3 id="전환-후">전환 후</h3>
+<ul>
+<li>24~48시간 모니터링</li>
+<li>DMS Task 중지</li>
+<li>소스 DB 1~2주 유지 (롤백 대비)</li>
+<li>이상이 없으면 소스 DB 삭제</li>
+</ul>
+<p><b>주의:</b> DMS는 단방향 복제만 지원합니다. 전환 후 소스 DB를 사용하면 안 됩니다.</p>
+<h2 id="주의사항과-팁">주의사항과 팁</h2>
+<h3 id="binlog-position-타이밍">Binlog Position 타이밍</h3>
+<p>다시 한번 강조하지만, binlog position은 스냅샷 생성 전에 확인해야 합니다. 이 타이밍을 놓치면 데이터 정합성 문제가 발생할 수 있습니다.</p>
+<h3 id="binlog-retention-충분히-확보">Binlog Retention 충분히 확보</h3>
+<p>Binlog retention은 충분히 길게 설정하세요. 스냅샷 생성, 공유, 복사, 복원까지 예상보다 시간이 오래 소요됩니다. 48시간 이상을 권장합니다.</p>
+<h3 id="커넥션-타임아웃-대응">커넥션 타임아웃 대응</h3>
+<p>소스 DB에 변경사항이 없는 시간이 길어지면 타겟 DB 연결이 중단될 수 있습니다. 타겟 DB의 wait_timeout을 24시간(86400초)으로 늘려 두는 것을 권장합니다.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">SET</span> GLOBAL wait_timeout <span class="pl-k">=</span> <span class="pl-c1">86400</span>;</pre></div>
+<p>또는 파라미터 그룹에서 영구적으로 설정할 수 있습니다.</p>
+<h3 id="primary-key-필수">Primary Key 필수</h3>
+<p>DMS는 Primary Key가 없는 테이블을 정상적으로 복제하지 못할 수 있습니다. 모든 테이블에 Primary Key가 있는지 확인하세요.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-c"><span class="pl-c">--</span> Primary Key 없는 테이블 찾기</span>
+<span class="pl-k">SELECT</span> 
+  <span class="pl-c1">t</span>.<span class="pl-c1">TABLE_SCHEMA</span>,
+  <span class="pl-c1">t</span>.<span class="pl-c1">TABLE_NAME</span>
+<span class="pl-k">FROM</span> <span class="pl-c1">information_schema</span>.<span class="pl-c1">TABLES</span> t
+<span class="pl-k">LEFT JOIN</span> <span class="pl-c1">information_schema</span>.<span class="pl-c1">KEY_COLUMN_USAGE</span> k 
+  <span class="pl-k">ON</span> <span class="pl-c1">t</span>.<span class="pl-c1">TABLE_SCHEMA</span> <span class="pl-k">=</span> <span class="pl-c1">k</span>.<span class="pl-c1">TABLE_SCHEMA</span> 
+  <span class="pl-k">AND</span> <span class="pl-c1">t</span>.<span class="pl-c1">TABLE_NAME</span> <span class="pl-k">=</span> <span class="pl-c1">k</span>.<span class="pl-c1">TABLE_NAME</span> 
+  <span class="pl-k">AND</span> <span class="pl-c1">k</span>.<span class="pl-c1">CONSTRAINT_NAME</span> <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">'</span>PRIMARY<span class="pl-pds">'</span></span>
+<span class="pl-k">WHERE</span> <span class="pl-c1">t</span>.<span class="pl-c1">TABLE_SCHEMA</span> NOT <span class="pl-k">IN</span> (<span class="pl-s"><span class="pl-pds">'</span>mysql<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>information_schema<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>performance_schema<span class="pl-pds">'</span></span>)
+  <span class="pl-k">AND</span> <span class="pl-c1">k</span>.<span class="pl-c1">COLUMN_NAME</span> IS <span class="pl-k">NULL</span>
+  <span class="pl-k">AND</span> <span class="pl-c1">t</span>.<span class="pl-c1">TABLE_TYPE</span> <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">'</span>BASE TABLE<span class="pl-pds">'</span></span>;</pre></div>
+<h3 id="full-load--cdc와-비교">Full Load + CDC와 비교</h3>
+<p>스냅샷 + CDC Only 방식을 사용하면서 느낀 점은, 확실히 시간은 절약되지만 고려해야 할 부분이 많다는 것입니다.</p>
+<p><b>Full Load + CDC 방식</b>을 사용하면:</p>
+<ul>
+<li>Binlog position을 DMS가 자동으로 관리</li>
+<li>데이터 정합성이 자동으로 보장됨</li>
+<li>운영이 훨씬 단순함</li>
+</ul>
+<p>데이터 크기가 500GB 이하이거나, 데이터 정합성이 매우 중요한 경우라면 Full Load + CDC 방식을 권장합니다. 몇 시간이 더 소요되더라도 안전한 방식이 바람직합니다.</p>
+<h2 id="마치며">마치며</h2>
+<p>AWS 계정 간 RDS 마이그레이션은 예상보다 복잡한 작업입니다. 특히 스냅샷 방식을 사용한다면 binlog position 타이밍과 retention 관리가 매우 중요합니다.</p>
+<p>이 글이 동일한 작업을 진행하시는 분들에게 도움이 되기를 바랍니다. 특히 타겟 DB 권한 설정이나 binlog position 타이밍 같은 부분은 문서에 자세히 기술되어 있지 않아 시행착오를 겪기 쉬운 부분입니다.</p>
+<h3 id="참고-자료">참고 자료</h3>
+<ul>
+<li><a href="https://docs.aws.amazon.com/dms/latest/userguide/" rel="nofollow">AWS DMS User Guide</a></li>
+<li><a href="https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Source.MySQL.html" rel="nofollow">Using MySQL as a Source for AWS DMS</a></li>
+<li><a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_LogAccess.MySQL.BinaryFormat.html" rel="nofollow">RDS Binary Logging</a></li>
+</ul>
+
+</div>
+</article>
+<footer class="footer">© 김형준 | <a href="mailto:kimhyju703@naver.com">kimhyju703@naver.com</a></footer>
+</main>
+</body>
+</html>
