@@ -45,6 +45,8 @@ a:hover { text-decoration-color: var(--text); }
 .callout .contact { margin-top: 8px; }
 .callout .note { color: var(--muted); font-size: 14px; margin-top: 2px; }
 .section-note { color: var(--muted); font-size: 14px; margin: 0 0 4px; }
+.articles { margin: 8px 0 0; padding-left: 1.4em; }
+.articles li { margin: 4px 0; }
 
 h2.section { font-size: 24px; font-weight: 700; margin: 48px 0 8px; line-height: 1.3; }
 

@@ -185,6 +185,18 @@ def build_home(projects):
         )
     career_note = f'<p class="section-note">{esc(site["career_note"])}</p>' if site.get("career_note") else ""
     stack_rows = "".join(f"<tr><th>{esc(k)}</th><td>{esc(v)}</td></tr>" for k, v in site["stack"])
+    originals = [m for m, _ in projects if m.get("original")]
+    articles = ""
+    if originals:
+        items = "".join(
+            f'<li><a href="{esc(m["original"])}" target="_blank" rel="noopener">{esc(m["title"])}</a></li>'
+            for m in originals
+        )
+        articles = (
+            '<h2 class="section">✍️ 기술 블로그 기고</h2>'
+            '<p class="section-note">MIDAS 기술 블로그(Medium)에 게시한 글입니다.</p>'
+            f'<ul class="articles">{items}</ul>'
+        )
     script = """<script>
 (() => {
   const buttons = [...document.querySelectorAll('.tabs button')];
@@ -208,6 +220,7 @@ def build_home(projects):
 <h2 class="section">📂 프로젝트</h2>
 <div class="tabs" role="tablist">{"".join(tab_buttons)}</div>
 <div class="cards">{"".join(cards)}</div>
+{articles}
 <h2 class="section">🏢 경력</h2>
 {career_note}<div class="career">{"".join(career)}</div>
 <h2 class="section">🛠 기술 스택</h2>
